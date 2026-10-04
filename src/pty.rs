@@ -284,23 +284,49 @@ pub fn run_pty(command: &[String], options: RenderOptions) -> Result<u32, CliErr
         None
     };
 
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader_thread = thread::spawn(move || {
+        let mut read_buf = [0u8; 2048];
+        loop {
+            match master_reader.read(&mut read_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if tx.send(read_buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    });
+
     let stdout = io::stdout();
     let mut processor = PtyStreamProcessor::new(stdout.lock(), options);
-    let mut read_buf = [0u8; 2048];
 
     loop {
-        match master_reader.read(&mut read_buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let text = String::from_utf8_lossy(&read_buf[..n]);
+        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
                 processor.process_chunk(&text)?;
             }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(Some(_)) = child.try_wait() {
+                    while let Ok(bytes) = rx.try_recv() {
+                        let text = String::from_utf8_lossy(&bytes);
+                        processor.process_chunk(&text)?;
+                    }
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 
     processor.finish()?;
+
+    drop(pair.master);
+    let _ = reader_thread.join();
 
     let exit_status = child
         .wait()
