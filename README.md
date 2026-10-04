@@ -1,0 +1,230 @@
+# Strmaid
+
+<div style="text-align: center">
+
+**Moteur haute performance de rendu natif de diagrammes Mermaid et de streaming Markdown pour terminaux modernes.**
+
+[![CI](https://github.com/ebedy/strmaid/actions/workflows/ci.yml/badge.svg)](https://github.com/ebedy/strmaid/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
+[![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
+
+</div>
+
+---
+
+**Strmaid** (`Stream` + `Mermaid`) est un outil CLI unifié, multiplateforme (Linux, macOS, Windows) et ultra-rapide écrit en pur Rust, conçu pour parser les flux Markdown en direct et afficher instantanément des diagrammes Mermaid pixel-perfect dans votre terminal (Windows Terminal, Kitty, Ghostty, iTerm2, WezTerm, Alacritty, Warp, etc.).
+
+Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, PTY/ConPTY) et la consommation en direct ou statique de flux textuels émis par des agents IA.
+
+---
+
+## Fonctionnalités Clés
+
+- **Moteur 100% Rust Natif (Zéro dépendance JavaScript/V8) :**
+  Génération et rasterisation instantanées (< 10 ms) grâce à [`mermaid-svg`](https://crates.io/crates/mermaid-svg) et [`resvg`](https://crates.io/crates/resvg). Aucun runtime V8 (`deno_core`), Node.js ou processus headless Chromium n'est requis.
+- **Protocoles Graphiques Avancés & Rendu Matriciel :**
+  - **Kitty Graphics Protocol :** Rendu haute fidélité natif pixel-perfect (supporté par Kitty, Ghostty, WezTerm).
+  - **iTerm2 Inline Images Protocol :** Protocole graphique inline supporté notamment sous macOS (iTerm2, WezTerm).
+  - **ANSI HalfBlocks TrueColor (Fallback universel) :** Repli déterministe en demi-blocs Unicode (`▀`, `▄`) avec couleurs 24-bit, compatible avec tous les émulateurs sous Windows (Windows Terminal, PowerShell, CMD), Linux et macOS.
+  - **AsciiBox (Fallback textuel monochrome) :** Rendu textuel compact pour terminaux contraints ou logs CI/CD sans TrueColor.
+- **Double Mode d'Exécution (Dual-Mode) :**
+  - **Live Streaming Pager (Interactif TUI) :** Activé automatiquement sur un TTY interactif ou avec `--pager`. Interface plein écran basée sur [`ratatui`](https://crates.io/crates/ratatui), avec auto-scroll en direct pendant le streaming et navigation fluide au clavier (`j`/`k`, flèches, `q`).
+  - **Filtre Composable :** Activé automatiquement dans les pipes ou avec `--no-pager`. Agit comme un filtre `stdin -> stdout` classique, idéal pour composer avec `cat`, `grep`, `less -R` ou des redirections.
+- **Repli Gracieux (Graceful Fallback) :**
+  En cas d'erreur de syntaxe Mermaid, le diagramme est affiché sous forme de bloc de texte brut formaté avec un avertissement discret, sans interrompre le flux ni faire planter l'application.
+- **Dimensionnement Dynamique & Thèmes :**
+  Calcul proportionnel automatique selon les dimensions matricielles du terminal (`ViewportGeometry`) et gestion des thèmes visuels (`dark`, `light`, `neutral`, `amber`, `phosphor`, `neon`, `mono`).
+
+---
+
+## Installation (Linux, macOS, Windows)
+
+### Prérequis
+- Environnement Linux (Debian, Ubuntu, Arch, Fedora, etc.) ou macOS.
+- Toolchain Rust (version 1.85+ ou édition 2024 recommandée) :
+  ```bash
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+  ```
+
+### 1. Installation directe via Cargo (Recommandé)
+```bash
+cargo install --path .
+```
+*(Le binaire `strmaid` sera installé dans `~/.cargo/bin/`).*
+
+### 2. Compilation manuelle du binaire Release
+```bash
+cargo build --release
+```
+Le binaire autonome optimisé se trouve dans `target/release/strmaid`.
+
+Pour l'ajouter directement à votre `$PATH` utilisateur sans sudo :
+```bash
+mkdir -p ~/.local/bin
+cp target/release/strmaid ~/.local/bin/
+chmod +x ~/.local/bin/strmaid
+```
+
+### 3. Intégration pour Agents IA via skills.sh
+
+Strmaid respecte la spécification ouverte [**`agentskills.io`**](https://agentskills.io) et est déployable via le registre [**`skills.sh`**](https://skills.sh). Pour équiper vos agents de code (Antigravity `agy`, Claude Code, Cursor, Windsurf) des capacités d'analyse, de validation et de rendu natif Mermaid :
+
+```bash
+npx skills add ebedy/strmaid
+```
+*(Consultez la fiche procédurale complète dans [`skills/strmaid/SKILL.md`](skills/strmaid/SKILL.md)).*
+
+---
+
+## Manuel d'Utilisation
+
+### Syntaxe générale
+```bash
+strmaid [OPTIONS] [FILE]
+```
+
+### Options de la ligne de commande
+
+| Option | Argument | Description |
+| :--- | :--- | :--- |
+| `[FILE]` | Chemin | Fichier Markdown à lire. Si omis, `strmaid` lit depuis l'entrée standard (`stdin`). |
+| `-b`, `--block-only` | *Aucun* | Mode visualiseur pour éditeur : rend un unique bloc Mermaid (avec ou sans balises Markdown), sans TUI. Code de sortie `0` (valide) ou `1` (erreur). |
+| `-w`, `--width` | Nombre | Surcharge la largeur du terminal en colonnes (déclenche la compaction progressive si < 80 cols). |
+| `-p`, `--pager` | *Aucun* | Force le mode pager interactif plein écran (TUI Ratatui). |
+| `--no-pager` | *Aucun* | Désactive le pager et force le mode filtre Unix composable (`stdout`). |
+| `-g`, `--graphics` | `kitty` \| `halfblocks` \| `asciibox` \| `raw` | Force le protocole graphique. Auto-détecté par défaut selon l'environnement. |
+| `-t`, `--theme` | `dark` \| `light` \| `neutral` \| `amber` \| `phosphor` \| `neon` \| `mono` | Définit le thème visuel pour les diagrammes (par défaut : `dark`). |
+| `--format` | `human` \| `json` \| `ndjson` | Format de sortie des flux analysés (par défaut : `human`). |
+| `-h`, `--help` | *Aucun* | Affiche l'aide de la commande. |
+| `-V`, `--version` | *Aucun* | Affiche la version de l'application. |
+
+---
+
+## Exemples Concrets
+
+### 1. Lecture directe d'un fichier Markdown
+```bash
+strmaid examples/test_sample.md
+```
+
+### 2. Consommation d'un flux d'agent IA en streaming
+```bash
+mon_agent_ia --stream | strmaid
+```
+
+### 3. Pipeline Unix composable avec redirection
+Pour envoyer le résultat vers un fichier ou un pager tiers :
+```bash
+cat document.md | strmaid --no-pager | less -R
+```
+
+### 4. Forcer le protocole en demi-blocs TrueColor
+Idéal pour les terminaux ne supportant pas le protocole Kitty :
+```bash
+strmaid examples/test_sample.md --graphics halfblocks
+```
+
+### 5. Repli textuel universel en art Unicode / ASCII Box-Drawing
+Pour les terminaux série, sessions SSH limitées ou logs CI sans couleur :
+```bash
+strmaid examples/test_sample.md --graphics asciibox
+```
+
+### 6. Utiliser un thème visuel rétro ou contrasté
+```bash
+# Style terminal CRT ambre (VT220) :
+strmaid examples/test_sample.md --theme amber
+
+# Style terminal CRT vert phosphorescent :
+strmaid examples/test_sample.md --theme phosphor
+
+# Palette cyberpunk / synthwave haute saturation :
+strmaid examples/test_sample.md --theme neon
+
+# Strict monochrome noir et blanc (e-ink / terminaux sans couleur) :
+strmaid examples/test_sample.md --theme mono
+```
+
+### 7. Sortie structurée pour agents IA (NDJSON & JSON)
+Pour consommer les métadonnées de rendu et valider la syntaxe sans latence dans un pipeline d'agent :
+```bash
+# Streaming ligne par ligne (NDJSON temps réel) :
+cat flux.md | strmaid --format ndjson
+
+# Rapport complet du document (JSON à EOF) :
+strmaid examples/test_sample.md --format json
+```
+
+### 8. Intégration dans un éditeur (Neovim, Helix) avec largeur personnalisée
+Pour prévisualiser instantanément la sélection ou le bloc sous le curseur dans une fenêtre flottante :
+```bash
+# Rendu immédiat d'une sélection (avec ou sans ```mermaid) contrainte à 60 colonnes :
+xclip -o | strmaid --block-only --width 60
+
+# Dans Neovim (:!strmaid -b -w 80) ou intégration comme linter Mermaid :
+strmaid --block-only diagram.mmd
+echo "Valide ? Statut exit code = $?"
+```
+
+---
+
+## Navigation dans le Pager TUI
+
+Lorsque le mode Pager interactif est actif :
+- `↑` / `k` : Défilement d'une ligne vers le haut.
+- `↓` / `j` : Défilement d'une ligne vers le bas.
+- `Page Up` : Défilement rapide vers le haut.
+- `Page Down` : Défilement rapide vers le bas.
+- `q` ou `Esc` : Quitter le pager et revenir au shell.
+
+---
+
+## Architecture & Décisions Techniques (ADR)
+
+Le projet applique une conception orientée domaine (DDD) stricte avec une politique de zéro avertissement au compilateur (`unwrap_used = "deny"`, `panic = "deny"`).
+
+- **Glossaire Métier :** Consultez [`CONTEXT.md`](CONTEXT.md) pour les définitions canoniques (`DiagramBlock`, `GraphicsProtocol`, `ExecutionMode`, etc.).
+- **Registres de Décisions d'Architecture (ADR) :**
+  - [ADR 0001 : Adoption d'un Moteur de Rendu Mermaid Natif en Rust](docs/adr/0001-mermaid-native-rust-engine.md)
+  - [ADR 0002 : Protocole Graphique Terminal et Repli Dégradé](docs/adr/0002-terminal-graphics-protocol-and-fallback.md)
+  - [ADR 0003 : Pipeline de Streaming Découplé et Live Streaming Pager](docs/adr/0003-streaming-pipeline-and-live-tui.md)
+  - [ADR 0004 : Dimensionnement Dynamique au Viewport et Thématisation](docs/adr/0004-dynamic-viewport-scaling-and-theming.md)
+  - [ADR 0005 : Stratégie de Nommage Strmaid et Feuille de Route Fonctionnelle](docs/adr/0005-naming-strategy-and-feature-roadmap.md)
+
+---
+
+## Feuille de Route & Backlog Fonctionnel
+
+Suite au benchmark comparatif face à l'écosystème existant (`fasouto/termaid`, `meraid`, `mermaid-text`), les fonctionnalités suivantes sont intégrées à la roadmap de développement (détails dans [`.agents/features_backlog_and_market_analysis.md`](.agents/features_backlog_and_market_analysis.md)) :
+
+1. **Protocole de repli textuel Unicode / ASCII (`GraphicsProtocol::AsciiBox`) :** [Livré]
+   Offrir un troisième niveau de repli dégradé en caractères box-drawing Unicode ou ASCII 7-bit pour les terminaux et environnements dépourvus de Kitty et de TrueColor 24-bit (sessions SSH anciennes, logs CI/CD monochromes).
+2. **Sortie Structurée pour Agents IA (`--format json` / NDJSON) :** [Livré]
+   Permettre l'émission de flux de métadonnées machine-readable (état de validation syntaxique, dimensions, erreurs explicites avec numéro de ligne et type d'anomalie) pour intégration transparente dans les pipelines d'agents d'IA.
+3. **Thématisation rétro et fort contraste :** [Livré]
+   Ajout des palettes `amber` (ambre monochrome style VT220), `phosphor` (vert phosphorescent), `neon` (cyberpunk) et `mono` (monochrome fort contraste).
+4. **Calcul de largeur Unicode & CJK-Awareness :** [Livré]
+   Prise en compte rigoureuse des caractères double-chasse CJK et emojis via `unicode-width` avec neutralisation des séquences ANSI pour garantir un dimensionnement matriciel sans distorsion.
+5. **Intégration comme visualiseur d'éditeur (`--block-only`) :** [Livré]
+   Point d'entrée dédié pour les extensions d'éditeurs (Neovim, Helix, VSCode terminal) afin d'afficher instantanément un diagramme sous le curseur avec code de sortie shell strict.
+6. **Compaction progressive adaptative :** [Livré]
+   Ajustement automatique du ratio et de la compacité vectorielle et matricielle lorsque le terminal présente une largeur contrainte (< 80 colonnes).
+
+---
+
+## Contribution & Communauté
+
+Nous accueillons les contributions avec plaisir ! Avant de soumettre une Pull Request, veuillez consulter :
+- Notre [Guide de Contribution](CONTRIBUTING.md) pour les règles de code, TDD et lints.
+- Notre [Code de Conduite](CODE_OF_CONDUCT.md).
+- Notre [Politique de Sécurité](SECURITY.md) pour tout signalement de vulnérabilité.
+
+---
+
+## Licence
+
+Ce projet est distribué sous double licence libre :
+- **Licence MIT** ([`LICENSE-MIT`](LICENSE-MIT))
+- **Licence Apache 2.0** ([`LICENSE-APACHE`](LICENSE-APACHE))
+
+Vous êtes libre de choisir la licence qui convient le mieux à vos besoins d'utilisation et d'intégration.

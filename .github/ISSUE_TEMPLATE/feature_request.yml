@@ -1,0 +1,29 @@
+name: 💡 Proposition d'Évolution
+description: Suggérez une nouvelle fonctionnalité ou une amélioration d'ergonomie pour Strmaid.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: Partagez vos idées pour enrichir Strmaid !
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problème ou besoin constaté
+      description: Quelle limitation ou quel cas d'usage motive cette proposition ?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Solution ou comportement proposé
+      description: Décrivez précisément comment la fonctionnalité devrait fonctionner (flags CLI, rendu, intégration).
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives envisagées
+      description: Avez-vous exploré d'autres approches ou outils pour résoudre ce problème ?

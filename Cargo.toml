@@ -1,0 +1,36 @@
+[package]
+name = "strmaid"
+version = "0.1.0"
+edition = "2024"
+authors = ["Komlan Edym BEDY <bedyedym@gmail.com>"]
+description = "High-performance streaming Markdown parser and native Mermaid diagram renderer for modern terminals"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ebedy/strmaid"
+homepage = "https://github.com/ebedy/strmaid"
+keywords = ["mermaid", "markdown", "terminal", "kitty", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+mermaid-svg = "0.7.0"
+resvg = "0.48.1"
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+base64 = "0.22.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+unicode-width = "0.2"
+portable-pty = "0.8"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
+[lints.clippy]
+all = { level = "deny", priority = -2 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

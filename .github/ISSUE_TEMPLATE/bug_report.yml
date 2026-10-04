@@ -1,0 +1,39 @@
+name: 🐛 Signalement de Bug
+description: Signalez une anomalie ou un dysfonctionnement de rendu dans Strmaid.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Merci de nous aider à stabiliser et améliorer Strmaid !
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description du problème
+      description: Résumé clair et concis de ce qui s'est produit.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Snippet Markdown / Mermaid de reproduction
+      description: Fournissez le texte minimal Markdown contenant le diagramme provoquant l'anomalie.
+      render: markdown
+    validations:
+      required: true
+
+  - type: input
+    id: terminal
+    attributes:
+      label: Émulateur de Terminal et Environnement
+      description: "Ex: Warp v0.2026, Kitty 0.35, WezTerm sous Debian 12 / Zsh"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sortie et traces d'erreurs
+      description: Collez ici la sortie CLI ou le comportement inattendu observé.
+      render: shell
