@@ -263,21 +263,26 @@ pub fn run_pty(command: &[String], options: RenderOptions) -> Result<u32, CliErr
 
     let _guard = RawModeGuard::enter()?;
 
-    let _stdin_thread = thread::spawn(move || {
-        let mut stdin = io::stdin();
-        let mut buf = [0u8; 1024];
-        loop {
-            match stdin.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if master_writer.write_all(&buf[..n]).is_err() {
-                        break;
+    let _stdin_thread = if io::stdin().is_terminal() {
+        Some(thread::spawn(move || {
+            let mut stdin = io::stdin();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stdin.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if master_writer.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                        let _ = master_writer.flush();
                     }
-                    let _ = master_writer.flush();
                 }
             }
-        }
-    });
+        }))
+    } else {
+        drop(master_writer);
+        None
+    };
 
     let stdout = io::stdout();
     let mut processor = PtyStreamProcessor::new(stdout.lock(), options);
