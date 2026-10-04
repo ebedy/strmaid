@@ -2,8 +2,8 @@
 name: strmaid
 description: Native terminal rendering, syntax validation, MCP server, and structured analysis for Mermaid diagrams in streaming Markdown. Use whenever generating, inspecting, validating, or fixing Mermaid code, running the Strmaid MCP server, diagnosing terminal graphics capabilities, or previewing Markdown flows.
 license: MIT OR Apache-2.0
-compatibility: Linux or macOS, requires strmaid binary in PATH
-metadata
+compatibility: Linux, macOS, or Windows (requires strmaid binary in PATH)
+metadata:
   version: "0.1.0"
   repository: https://github.com/ebedy/strmaid
 ---
@@ -25,8 +25,11 @@ Ce skill fournit les procédures et directives permettant à un agent IA de pilo
 Avant d'exécuter `strmaid`, s'assurer que le binaire est présent dans le `$PATH` :
 
 ```bash
-# Vérification
+# Sous Linux / macOS (bash / zsh) :
 command -v strmaid >/dev/null 2>&1 || cargo install --path .
+
+# Sous Windows (PowerShell) :
+if (-not (Get-Command strmaid -ErrorAction SilentlyContinue)) { cargo install --path . }
 ```
 
 Si le binaire n'est pas encore installé, l'installer via Cargo :
@@ -149,7 +152,8 @@ strmaid doctor --format json
       "COLORTERM": "truecolor",
       "KITTY_WINDOW_ID": null,
       "TERM": "xterm-256color",
-      "TERM_PROGRAM": "iTerm.app"
+      "TERM_PROGRAM": "iTerm.app",
+      "WT_SESSION": null
     }
   },
   "pipeline": {
@@ -256,7 +260,7 @@ Pour afficher un diagramme sous forme visuelle dans le terminal sans bloquer l'i
 ### A. Protocoles graphiques supportés (`-g`, `--graphics`)
 - `kitty` : Rendu natif GPU pixel-perfect pour Warp, Kitty, WezTerm, Ghostty.
 - `iterm2` : Protocole d'affichage d'images pour iTerm2 et terminaux compatibles macOS.
-- `halfblocks` : Repli universel demi-blocs Unicode (`▀`, `▄`) TrueColor 24-bit (compatible tous terminaux Linux modernes).
+- `halfblocks` : Repli universel demi-blocs Unicode (`▀`, `▄`) TrueColor 24-bit (compatible Windows Terminal, PowerShell, CMD, et tous terminaux Linux/macOS modernes).
 - `asciibox` : Repli en art Unicode/Braille / ASCII box-drawing pour terminaux contraints, sessions SSH anciennes ou logs CI monochromes.
 - `raw` : Sortie brute non encapsulée.
 
