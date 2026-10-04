@@ -54,20 +54,20 @@ cargo install strmaid
 *(Le binaire `strmaid` est directement installé dans `~/.cargo/bin/`).*
 
 ### 2. Binaires autonomes précompilés (Sans runtime Rust)
-Téléchargez l'archive correspondant à votre architecture depuis la page [**GitHub Releases v0.1.0**](https://github.com/ebedy/strmaid/releases/tag/v0.1.0) :
+Téléchargez l'archive correspondant à votre architecture depuis la page [**GitHub Releases v0.1.1**](https://github.com/ebedy/strmaid/releases/tag/v0.1.1) :
 
 | Plateforme | Cible | Téléchargement |
 | :--- | :--- | :--- |
-| **Linux (glibc)** | `x86_64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
-| **Linux (musl statique)** | `x86_64-unknown-linux-musl` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-unknown-linux-musl.tar.gz) |
-| **Linux ARM64** | `aarch64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
-| **macOS Apple Silicon** | `aarch64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-aarch64-apple-darwin.tar.gz) |
-| **macOS Intel** | `x86_64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-apple-darwin.tar.gz) |
-| **Windows x64** | `x86_64-pc-windows-msvc` | [Archive .zip](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-pc-windows-msvc.zip) |
+| **Linux (glibc)** | `x86_64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.1/strmaid-v0.1.1-x86_64-unknown-linux-gnu.tar.gz) |
+| **Linux (musl statique)** | `x86_64-unknown-linux-musl` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.1/strmaid-v0.1.1-x86_64-unknown-linux-musl.tar.gz) |
+| **Linux ARM64** | `aarch64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.1/strmaid-v0.1.1-aarch64-unknown-linux-gnu.tar.gz) |
+| **macOS Apple Silicon** | `aarch64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.1/strmaid-v0.1.1-aarch64-apple-darwin.tar.gz) |
+| **macOS Intel** | `x86_64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.1/strmaid-v0.1.1-x86_64-apple-darwin.tar.gz) |
+| **Windows x64** | `x86_64-pc-windows-msvc` | [Archive .zip](https://github.com/ebedy/strmaid/releases/download/v0.1.1/strmaid-v0.1.1-x86_64-pc-windows-msvc.zip) |
 
 ```bash
 # Exemple d'installation sous Linux / macOS :
-tar -xzf strmaid-v0.1.0-*.tar.gz
+tar -xzf strmaid-v0.1.1-*.tar.gz
 sudo mv strmaid /usr/local/bin/
 ```
 

@@ -1,6 +1,6 @@
 [package]
 name = "strmaid"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Komlan Edym BEDY <bedyedym@gmail.com>"]
 description = "High-performance streaming Markdown parser and native Mermaid diagram renderer for modern terminals"
