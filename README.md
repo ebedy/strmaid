@@ -4,6 +4,7 @@
 
 **Moteur haute performance de rendu natif de diagrammes Mermaid et de streaming Markdown pour terminaux modernes.**
 
+[![Crates.io](https://img.shields.io/crates/v/strmaid.svg)](https://crates.io/crates/strmaid)
 [![CI](https://github.com/ebedy/strmaid/actions/workflows/ci.yml/badge.svg)](https://github.com/ebedy/strmaid/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
@@ -46,31 +47,52 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
 
-### 1. Installation directe via Cargo (Recommandé)
+### 1. Via Cargo depuis Crates.io (Recommandé)
 ```bash
+cargo install strmaid
+```
+*(Le binaire `strmaid` est directement installé dans `~/.cargo/bin/`).*
+
+### 2. Binaires autonomes précompilés (Sans runtime Rust)
+Téléchargez l'archive correspondant à votre architecture depuis la page [**GitHub Releases v0.1.0**](https://github.com/ebedy/strmaid/releases/tag/v0.1.0) :
+
+| Plateforme | Cible | Téléchargement |
+| :--- | :--- | :--- |
+| **Linux (glibc)** | `x86_64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
+| **Linux (musl statique)** | `x86_64-unknown-linux-musl` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-unknown-linux-musl.tar.gz) |
+| **Linux ARM64** | `aarch64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
+| **macOS Apple Silicon** | `aarch64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-aarch64-apple-darwin.tar.gz) |
+| **macOS Intel** | `x86_64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-apple-darwin.tar.gz) |
+| **Windows x64** | `x86_64-pc-windows-msvc` | [Archive .zip](https://github.com/ebedy/strmaid/releases/download/v0.1.0/strmaid-v0.1.0-x86_64-pc-windows-msvc.zip) |
+
+```bash
+# Exemple d'installation sous Linux / macOS :
+tar -xzf strmaid-v0.1.0-*.tar.gz
+sudo mv strmaid /usr/local/bin/
+```
+
+### 3. Depuis les sources locales
+```bash
+git clone https://github.com/ebedy/strmaid.git
+cd strmaid
 cargo install --path .
 ```
-*(Le binaire `strmaid` sera installé dans `~/.cargo/bin/`).*
 
-### 2. Compilation manuelle du binaire Release
+### 4. Vérification & Diagnostic Système
+Validez l'installation et inspectez les capacités de votre terminal hôte avec la commande dédiée :
 ```bash
-cargo build --release
-```
-Le binaire autonome optimisé se trouve dans `target/release/strmaid`.
-
-Pour l'ajouter directement à votre `$PATH` utilisateur sans sudo :
-```bash
-mkdir -p ~/.local/bin
-cp target/release/strmaid ~/.local/bin/
-chmod +x ~/.local/bin/strmaid
+strmaid doctor
 ```
 
-### 3. Intégration pour Agents IA via skills.sh
-
-Strmaid respecte la spécification ouverte [**`agentskills.io`**](https://agentskills.io) et est déployable via le registre [**`skills.sh`**](https://skills.sh). Pour équiper vos agents de code (Antigravity `agy`, Claude Code, Cursor, Windsurf) des capacités d'analyse, de validation et de rendu natif Mermaid :
-
+### 5. Intégration pour Agents IA via Skill
+Strmaid respecte la spécification ouverte [**`agentskills.io`**](https://agentskills.io) et est déployable via le registre [**`skills.sh`**](https://skills.sh) :
 ```bash
 npx skills add ebedy/strmaid
+```
+Ou manuellement pour Antigravity / Claude Code :
+```bash
+mkdir -p ~/.agents/skills/strmaid
+cp skills/strmaid/SKILL.md ~/.agents/skills/strmaid/SKILL.md
 ```
 *(Consultez la fiche procédurale complète dans [`skills/strmaid/SKILL.md`](skills/strmaid/SKILL.md)).*
 
@@ -97,6 +119,14 @@ strmaid [OPTIONS] [FILE]
 | `--format` | `human` \| `json` \| `ndjson` | Format de sortie des flux analysés (par défaut : `human`). |
 | `-h`, `--help` | *Aucun* | Affiche l'aide de la commande. |
 | `-V`, `--version` | *Aucun* | Affiche la version de l'application. |
+
+### Sous-commandes dédiées
+
+| Sous-commande | Arguments | Description |
+| :--- | :--- | :--- |
+| `strmaid doctor` | `[--format human\|json\|ndjson]` | Diagnostique les capacités matérielles et logicielles du terminal hôte (TrueColor, PTY, SVG, resvg). |
+| `strmaid run` | `<COMMAND...>` | Exécute une commande dans un pseudo-terminal (PTY) interactif en interceptant les diagrammes Mermaid. |
+| `strmaid mcp` | *Aucun* | Démarre le serveur Model Context Protocol (MCP) natif sur standard I/O (JSON-RPC 2.0). |
 
 ---
 
@@ -164,6 +194,85 @@ xclip -o | strmaid --block-only --width 60
 # Dans Neovim (:!strmaid -b -w 80) ou intégration comme linter Mermaid :
 strmaid --block-only diagram.mmd
 echo "Valide ? Statut exit code = $?"
+```
+
+### 9. Diagnostic des capacités du terminal hôte
+```bash
+# Rapport lisible humain :
+strmaid doctor
+
+# Rapport d'audit au format JSON machine-readable :
+strmaid doctor --format json
+```
+
+### 10. Interception dynamique de commandes externes (PTY / ConPTY)
+Pour exécuter un script ou un agent CLI interactif et intercepter automatiquement ses diagrammes Mermaid en direct :
+```bash
+strmaid run python3 mon_agent.py
+```
+
+---
+
+## Intégration Serveur MCP (Model Context Protocol)
+
+`strmaid` intègre nativement un serveur **Model Context Protocol (MCP)** standardisé via standard I/O (JSON-RPC 2.0). C'est le mode d'intégration recommandé pour les agents d'IA (Antigravity `agy`, Claude Desktop, Cursor, Windsurf, Cline).
+
+### Outils exposés aux agents IA
+
+| Outil MCP | Description | Paramètres d'entrée |
+| :--- | :--- | :--- |
+| `strmaid_validate` | Valide instantanément la syntaxe Mermaid (< 10 ms) et localise l'anomalie exacte. | `source` (string, requis) |
+| `strmaid_render` | Génère le SVG vectoriel et le PNG matriciel encodé en Base64 avec dimensions exactes. | `source` (string), `theme` (optionnel), `width` (optionnel) |
+| `strmaid_detect` | Scanne un document Markdown et extrait tous les diagrammes Mermaid avec leurs métadonnées. | `markdown` (string, requis) |
+
+### Configuration pour Antigravity CLI (`agy`)
+
+Ajoutez l'entrée dans [`~/.gemini/config/mcp_config.json`](~/.gemini/config/mcp_config.json) :
+```json
+{
+  "mcpServers": {
+    "strmaid": {
+      "command": "strmaid",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Configuration pour Claude Desktop
+
+Dans `~/.config/Claude/claude_desktop_config.json` (Linux) ou `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) :
+```json
+{
+  "mcpServers": {
+    "strmaid": {
+      "command": "strmaid",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+### Configuration pour Cursor / Windsurf / Cline
+
+Dans les paramètres MCP (`mcp.json`) :
+```json
+{
+  "mcpServers": {
+    "strmaid": {
+      "command": "strmaid",
+      "args": ["mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+### Test de communication stdio
+
+Pour vérifier l'initialisation du serveur MCP depuis votre shell :
+```bash
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n' | strmaid mcp
 ```
 
 ---
