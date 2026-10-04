@@ -129,8 +129,6 @@ jobs:
     name: Publish to Crates.io
     needs: publish-release
     runs-on: ubuntu-latest
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -139,5 +137,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Publish package
-        if: env.CARGO_REGISTRY_TOKEN != ''
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"

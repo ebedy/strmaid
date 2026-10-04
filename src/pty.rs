@@ -1,7 +1,7 @@
 use crate::domain::{CliError, DiagramBlock, strip_ansi};
 use crate::renderer::{self, RenderOptions};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::thread;
 
 /// Garde RAII pour la gestion du mode brut du terminal hôte.
@@ -13,15 +13,30 @@ impl RawModeGuard {
     /// Active le mode brut si nécessaire et retourne la garde RAII.
     ///
     /// # Errors
-    /// Renvoie `CliError::TerminalInit` si l'activation échoue.
+    /// Renvoie `CliError::TerminalInit` si l'activation échoue pour une raison autre
+    /// que l'absence d'un terminal interactif (ex: headless CI, pipe).
     pub fn enter() -> Result<Self, CliError> {
+        if !io::stdin().is_terminal() {
+            return Ok(Self { active: false });
+        }
         if crossterm::terminal::is_raw_mode_enabled().unwrap_or(false) {
             return Ok(Self { active: false });
         }
-        crossterm::terminal::enable_raw_mode()
-            .map_err(|e| CliError::TerminalInit(format!("Échec activation raw mode: {e}")))?;
-        Ok(Self { active: true })
+        match crossterm::terminal::enable_raw_mode() {
+            Ok(()) => Ok(Self { active: true }),
+            Err(e) if is_headless_terminal_error(&e) => Ok(Self { active: false }),
+            Err(e) => Err(CliError::TerminalInit(format!(
+                "Échec activation raw mode: {e}"
+            ))),
+        }
     }
+}
+
+fn is_headless_terminal_error(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::NotFound | io::ErrorKind::BrokenPipe
+    ) || matches!(err.raw_os_error(), Some(6 | 9 | 19 | 25))
 }
 
 impl Drop for RawModeGuard {
@@ -346,5 +361,21 @@ mod tests {
 
         let out_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(out_str, "agent> ");
+    }
+
+    #[test]
+    fn test_raw_mode_guard_enter_in_non_interactive_env() {
+        let guard = RawModeGuard::enter();
+        assert!(guard.is_ok());
+    }
+
+    #[test]
+    fn test_is_headless_terminal_error_matches_enotty_and_enxio() {
+        let enxio = io::Error::from_raw_os_error(6);
+        let enotty = io::Error::from_raw_os_error(25);
+        let other = io::Error::from_raw_os_error(1);
+        assert!(is_headless_terminal_error(&enxio));
+        assert!(is_headless_terminal_error(&enotty));
+        assert!(!is_headless_terminal_error(&other));
     }
 }
