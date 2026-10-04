@@ -18,8 +18,8 @@ Tout code soumis au projet doit respecter ces impératifs fondamentaux :
      cargo clippy --all-targets -- -D warnings
      ```
 2. **Conception Dirigée par le Domaine (DDD) :**
-   - Respectez scrupuleusement le glossaire unifié consigné dans [`CONTEXT.md`](CONTEXT.md).
-   - Toute décision architecturale majeure ou difficilement réversible doit faire l'objet d'un nouvel ADR dans `docs/adr/`.
+   - Respectez scrupuleusement le glossaire unifié et les décisions fondatrices consignés dans [`CONTEXT.md`](CONTEXT.md).
+   - Toute décision architecturale majeure ou difficilement réversible doit être documentée et justifiée dans [`CONTEXT.md`](CONTEXT.md).
 3. **Complexité ultra-basse & Clean Code :**
    - Fonctions courtes, linéaires et à responsabilité unique (SRP).
    - Inversion des conditions et sorties précoce (*guard clauses*) pour éviter l'imbrication (`nesting <= 2`).

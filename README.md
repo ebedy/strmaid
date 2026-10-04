@@ -179,17 +179,11 @@ Lorsque le mode Pager interactif est actif :
 
 ---
 
-## Architecture & Décisions Techniques (ADR)
+## Architecture & Décisions Techniques
 
 Le projet applique une conception orientée domaine (DDD) stricte avec une politique de zéro avertissement au compilateur (`unwrap_used = "deny"`, `panic = "deny"`).
 
-- **Glossaire Métier :** Consultez [`CONTEXT.md`](CONTEXT.md) pour les définitions canoniques (`DiagramBlock`, `GraphicsProtocol`, `ExecutionMode`, etc.).
-- **Registres de Décisions d'Architecture (ADR) :**
-  - [ADR 0001 : Adoption d'un Moteur de Rendu Mermaid Natif en Rust](docs/adr/0001-mermaid-native-rust-engine.md)
-  - [ADR 0002 : Protocole Graphique Terminal et Repli Dégradé](docs/adr/0002-terminal-graphics-protocol-and-fallback.md)
-  - [ADR 0003 : Pipeline de Streaming Découplé et Live Streaming Pager](docs/adr/0003-streaming-pipeline-and-live-tui.md)
-  - [ADR 0004 : Dimensionnement Dynamique au Viewport et Thématisation](docs/adr/0004-dynamic-viewport-scaling-and-theming.md)
-  - [ADR 0005 : Stratégie de Nommage Strmaid et Feuille de Route Fonctionnelle](docs/adr/0005-naming-strategy-and-feature-roadmap.md)
+- **Glossaire Métier & Décisions Fondatrices :** Consultez [`CONTEXT.md`](CONTEXT.md) pour les définitions canoniques (`DiagramBlock`, `GraphicsProtocol`, `ExecutionMode`, etc.) ainsi que les arbitrages d'architecture fondateurs (moteur Rust natif sub-10ms, protocoles graphiques Kitty/TrueColor/AsciiBox, dual-mode filtre/pager et dimensionnement dynamique).
 
 ---
 

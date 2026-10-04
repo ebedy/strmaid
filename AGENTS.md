@@ -1,6 +1,6 @@
 # AGENTS.md — Strmaid
 
-Instructions opérationnelles pour les agents qui modifient ce dépôt. La vérité vivante du projet est dans le code, `Cargo.toml`, `README.md`, `CONTEXT.md`, `CONTRIBUTING.md` et les ADR de `docs/adr/`.
+Instructions opérationnelles pour les agents qui modifient ce dépôt. La vérité vivante du projet est dans le code, `Cargo.toml`, `README.md`, `CONTEXT.md` et `CONTRIBUTING.md`.
 
 ## Mission
 
@@ -10,10 +10,9 @@ Le comportement prioritaire est le streaming robuste : une entrée invalide, tro
 
 ## Documentation A Consulter
 
-- `CONTEXT.md` : vocabulaire de domaine à respecter dans le code, les tests, les commits et la documentation.
+- `CONTEXT.md` : vocabulaire de domaine et décisions d'architecture fondatrices à respecter dans le code, les tests, les commits et la documentation.
 - `README.md` : comportement utilisateur, options CLI et exemples.
 - `CONTRIBUTING.md` : standards de contribution, TDD, lints et commits.
-- `docs/adr/` : décisions architecturales. Créer un nouvel ADR pour une décision structurante ou difficile à inverser.
 
 Pour toute question sur une bibliothèque, un framework, un SDK, une API, un CLI ou un service cloud, utiliser Context7 avant de répondre ou coder. Commencer par `resolve-library-id`, puis interroger la documentation avec `query-docs` sur un concept précis.
 
@@ -68,7 +67,7 @@ Si `CONTEXT.md` et le code divergent, garder la compatibilité avec le code exis
 - TUI via `ratatui` / `crossterm`.
 - Rendu terminal via Kitty Graphics Protocol, demi-blocs ANSI TrueColor ou sortie `raw`.
 
-Ne pas ajouter Node.js, Puppeteer, Chromium ou un runtime JavaScript dans la boucle de rendu. Si un changement impose un moteur externe, le justifier dans un ADR avant implementation.
+Ne pas ajouter Node.js, Puppeteer, Chromium ou un runtime JavaScript dans la boucle de rendu. Si un changement impose un moteur externe, le documenter et le justifier rigoureusement dans `CONTEXT.md` avant implémentation.
 
 ## Modes D'Execution
 
