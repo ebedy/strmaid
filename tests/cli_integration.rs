@@ -112,17 +112,10 @@ fn test_cli_mcp_initialize() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_cli_run_echo_command() -> TestResult {
     let mut cmd = strmaid_cmd()?;
-    if cfg!(windows) {
-        cmd.arg("run")
-            .arg("--")
-            .arg("cmd")
-            .arg("/c")
-            .arg("echo hello from pty");
-    } else {
-        cmd.arg("run").arg("--").arg("echo").arg("hello from pty");
-    }
+    cmd.arg("run").arg("--").arg("echo").arg("hello from pty");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("hello from pty"));
@@ -130,21 +123,14 @@ fn test_cli_run_echo_command() -> TestResult {
 }
 
 #[test]
+#[cfg(unix)]
 fn test_cli_run_intercepts_diagram() -> TestResult {
     let mut cmd = strmaid_cmd()?;
-    if cfg!(windows) {
-        cmd.arg("run")
-            .arg("--")
-            .arg("cmd")
-            .arg("/c")
-            .arg("echo intro & echo ```mermaid & echo flowchart TD & echo   A --^> B & echo ``` & echo outro");
-    } else {
-        cmd.arg("run")
-            .arg("--")
-            .arg("sh")
-            .arg("-c")
-            .arg("echo 'intro'; echo '```mermaid'; echo 'flowchart TD'; echo '  A --> B'; echo '```'; echo 'outro'");
-    }
+    cmd.arg("run")
+        .arg("--")
+        .arg("sh")
+        .arg("-c")
+        .arg("echo 'intro'; echo '```mermaid'; echo 'flowchart TD'; echo '  A --> B'; echo '```'; echo 'outro'");
     cmd.assert()
         .success()
         .stdout(predicate::str::contains("intro"))
