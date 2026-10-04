@@ -299,7 +299,13 @@ commande_source | strmaid --no-pager
 ### B. Intercepteur interactif en pseudo-terminal (`strmaid run`)
 Pour exécuter une session interactive (ex. CLI d'un agent IA, REPL) au sein d'un pseudo-terminal (PTY) tout en interceptant automatiquement les diagrammes Mermaid au vol pour les afficher directement en graphisme terminal :
 ```bash
-# Exécute un CLI tiers dans un PTY avec rendu inline des diagrammes Mermaid :
-strmaid run my_ai_agent_cli
+# Exécute un CLI d'agent (ex. Antigravity agy) dans un PTY avec rendu inline des diagrammes Mermaid :
+strmaid run agy
+
+# Reprise d'une conversation spécifique avec agy :
+strmaid run agy --dangerously-skip-permissions --conversation=<CONVERSATION_ID>
+
+# Exécution de tout autre CLI tiers ou script Python :
+strmaid run python3 mon_agent.py
 ```
 L'application cible conserve toutes ses capacités TTY (raw mode, gestion des touches, couleurs ANSI) tandis que les blocs ```` ```mermaid ```` sont détectés, rendus graphiquement et réinjectés dans l'affichage terminal.

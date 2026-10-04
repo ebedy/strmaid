@@ -137,10 +137,16 @@ strmaid [OPTIONS] [FILE]
 strmaid examples/test_sample.md
 ```
 
-### 2. Consommation d'un flux d'agent IA en streaming
+### 2. Consommation d'un flux d'agent IA en streaming (Mode Tube Unix)
+Pour consommer la réponse d'un agent de code en streaming non-interactif via un tube Unix :
 ```bash
-mon_agent_ia --stream | strmaid
+# Exemple avec Antigravity CLI (agy) en mode print avec désactivation du pager :
+agy -p "Décris l'architecture du projet avec un diagramme Mermaid" | strmaid --no-pager
+
+# Exemple générique avec tout agent IA émettant sur stdout :
+mon_agent_ia --print "Génère un flux Markdown" | strmaid --no-pager
 ```
+> **Conseil :** L'option `--no-pager` est recommandée lors de l'enchaînement dans un pipe pour éviter l'instanciation du pager plein écran et prévenir les collisions d'affichage si l'outil source émet des messages d'avertissement sur `stderr`.
 
 ### 3. Pipeline Unix composable avec redirection
 Pour envoyer le résultat vers un fichier ou un pager tiers :
@@ -205,9 +211,16 @@ strmaid doctor
 strmaid doctor --format json
 ```
 
-### 10. Interception dynamique de commandes externes (PTY / ConPTY)
-Pour exécuter un script ou un agent CLI interactif et intercepter automatiquement ses diagrammes Mermaid en direct :
+### 10. Interception dynamique d'agents interactifs (PTY / ConPTY)
+Pour exécuter une session interactive d'agent IA (ou tout script CLI) tout en conservant l'interactivité complète du terminal et en interceptant automatiquement les diagrammes Mermaid en direct :
 ```bash
+# Lancement interactif d'Antigravity CLI (agy) au sein de strmaid :
+strmaid run agy
+
+# Reprise d'une conversation existante en session interactive PTY :
+strmaid run agy --dangerously-skip-permissions --conversation=<hash conversation>
+
+# Interception d'un script ou agent Python interactif :
 strmaid run python3 mon_agent.py
 ```
 
