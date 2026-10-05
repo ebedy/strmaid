@@ -2,7 +2,10 @@ use crate::domain::{CliError, ViewportGeometry};
 use crate::renderer::{self, RenderOptions};
 use crate::stream::{StreamItem, StreamStateMachine};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -24,8 +27,8 @@ struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen);
     }
 }
 
@@ -93,6 +96,26 @@ impl PagerApp {
         }
     }
 
+    pub const fn scroll_to_top(&mut self) {
+        self.scroll = 0;
+        self.auto_scroll = false;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll = self.lines.len().saturating_sub(self.visible_height);
+        self.auto_scroll = true;
+    }
+
+    pub fn scroll_half_page_up(&mut self) {
+        let delta = (self.visible_height / 2).max(1);
+        self.scroll_up(delta);
+    }
+
+    pub fn scroll_half_page_down(&mut self) {
+        let delta = (self.visible_height / 2).max(1);
+        self.scroll_down(delta);
+    }
+
     pub fn update_scroll_to_bottom(&mut self, max_visible: usize) {
         self.visible_height = max_visible;
         if self.auto_scroll {
@@ -111,7 +134,8 @@ pub fn run_pager<R: BufRead + Send + 'static>(
 ) -> Result<(), CliError> {
     enable_raw_mode().map_err(|e| CliError::TerminalInit(e.to_string()))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(|e| CliError::TerminalInit(e.to_string()))?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|e| CliError::TerminalInit(e.to_string()))?;
     let _guard = TerminalGuard;
 
     let backend = CrosstermBackend::new(stdout);
@@ -167,58 +191,140 @@ fn spawn_reader_thread<R: BufRead + Send + 'static>(
     rx
 }
 
-/// Boucle principale de rendu et de gestion des événements TUI.
+/// Résultat du traitement d'un événement terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalEventOutcome {
+    NoEvent,
+    Redraw,
+    Quit,
+}
+
+/// Boucle principale de rendu et de gestion des événements TUI (Render-on-Change réactif).
 fn run_event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut PagerApp,
     rx: &Receiver<Result<PagerEvent, CliError>>,
     options: RenderOptions,
 ) -> Result<(), CliError> {
+    let mut dirty = true;
+
     loop {
-        consume_pending_items(app, rx, options)?;
+        if consume_pending_items(app, rx, options)? {
+            dirty = true;
+        }
 
-        terminal
-            .draw(|frame| render_frame(frame, app))
-            .map_err(|e| CliError::Io(e.to_string()))?;
+        if dirty {
+            terminal
+                .draw(|frame| render_frame(frame, app))
+                .map_err(|e| CliError::Io(e.to_string()))?;
+            dirty = false;
+        }
 
-        if matches!(event::poll(Duration::from_millis(50)), Ok(true)) && poll_and_handle_key(app) {
-            break;
+        let poll_duration = if app.stream_finished {
+            Duration::from_secs(3600)
+        } else {
+            Duration::from_millis(16)
+        };
+
+        if event::poll(poll_duration).map_err(|e| CliError::Io(e.to_string()))? {
+            let event = event::read().map_err(|e| CliError::Io(e.to_string()))?;
+            match process_terminal_event(app, &event) {
+                TerminalEventOutcome::Quit => break,
+                TerminalEventOutcome::Redraw => dirty = true,
+                TerminalEventOutcome::NoEvent => {}
+            }
         }
     }
     Ok(())
 }
 
-/// Lit et traite un événement clavier s'il est disponible.
-fn poll_and_handle_key(app: &mut PagerApp) -> bool {
-    if let Ok(Event::Key(key)) = event::read() {
-        key.kind == KeyEventKind::Press && handle_key_event(app, key.code)
-    } else {
-        false
+/// Traite un événement terminal (clavier, souris, redimensionnement).
+fn process_terminal_event(app: &mut PagerApp, event: &Event) -> TerminalEventOutcome {
+    match *event {
+        Event::Key(key) => {
+            if handle_key_press(app, key) {
+                TerminalEventOutcome::Quit
+            } else {
+                TerminalEventOutcome::Redraw
+            }
+        }
+        Event::Mouse(mouse) => {
+            if handle_mouse_event(app, mouse) {
+                TerminalEventOutcome::Redraw
+            } else {
+                TerminalEventOutcome::NoEvent
+            }
+        }
+        Event::Resize(_, _) => TerminalEventOutcome::Redraw,
+        _ => TerminalEventOutcome::NoEvent,
     }
 }
 
 /// Consomme les éléments reçus du thread de streaming.
+/// Retourne `Ok(true)` si de nouveaux éléments ont été ajoutés ou si le statut a muté.
 fn consume_pending_items(
     app: &mut PagerApp,
     rx: &Receiver<Result<PagerEvent, CliError>>,
     options: RenderOptions,
-) -> Result<(), CliError> {
+) -> Result<bool, CliError> {
+    let mut changed = false;
     loop {
         match rx.try_recv() {
-            Ok(Ok(PagerEvent::Item(item))) => app.add_item(item, options),
-            Ok(Ok(PagerEvent::Finished)) => app.stream_finished = true,
+            Ok(Ok(PagerEvent::Item(item))) => {
+                app.add_item(item, options);
+                changed = true;
+            }
+            Ok(Ok(PagerEvent::Finished)) => {
+                if !app.stream_finished {
+                    app.stream_finished = true;
+                    changed = true;
+                }
+            }
             Ok(Err(err)) => return Err(err),
-            Err(TryRecvError::Empty) => return Ok(()),
+            Err(TryRecvError::Empty) => return Ok(changed),
             Err(TryRecvError::Disconnected) => {
-                app.stream_finished = true;
-                return Ok(());
+                if !app.stream_finished {
+                    app.stream_finished = true;
+                    changed = true;
+                }
+                return Ok(changed);
             }
         }
     }
 }
 
-/// Traite les frappes clavier. Retourne `true` pour quitter.
-fn handle_key_event(app: &mut PagerApp, code: KeyCode) -> bool {
+/// Traite les combinaisons de touches avec modificateurs (`Ctrl`, etc.).
+pub(crate) fn handle_key_press(app: &mut PagerApp, key: KeyEvent) -> bool {
+    if key.kind != KeyEventKind::Press {
+        return false;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return true,
+            KeyCode::Char('u') => {
+                app.scroll_half_page_up();
+                return false;
+            }
+            KeyCode::Char('d') => {
+                app.scroll_half_page_down();
+                return false;
+            }
+            KeyCode::Char('b') => {
+                app.scroll_up(app.visible_height.max(1));
+                return false;
+            }
+            KeyCode::Char('f') => {
+                app.scroll_down(app.visible_height.max(1));
+                return false;
+            }
+            _ => return false,
+        }
+    }
+    handle_key_event(app, key.code)
+}
+
+/// Traite les frappes clavier standards. Retourne `true` pour quitter.
+pub(crate) fn handle_key_event(app: &mut PagerApp, code: KeyCode) -> bool {
     let page_delta = app.visible_height.max(1);
     match code {
         KeyCode::Char('q') | KeyCode::Esc => true,
@@ -230,13 +336,44 @@ fn handle_key_event(app: &mut PagerApp, code: KeyCode) -> bool {
             app.scroll_down(1);
             false
         }
-        KeyCode::PageUp => {
+        KeyCode::PageUp | KeyCode::Char('b') => {
             app.scroll_up(page_delta);
             false
         }
-        KeyCode::PageDown => {
+        KeyCode::PageDown | KeyCode::Char('f' | ' ') => {
             app.scroll_down(page_delta);
             false
+        }
+        KeyCode::Home | KeyCode::Char('g') => {
+            app.scroll_to_top();
+            false
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            app.scroll_to_bottom();
+            false
+        }
+        KeyCode::Char('u') => {
+            app.scroll_half_page_up();
+            false
+        }
+        KeyCode::Char('d') => {
+            app.scroll_half_page_down();
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Traite les interactions de la molette de souris.
+pub(crate) fn handle_mouse_event(app: &mut PagerApp, mouse: MouseEvent) -> bool {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => {
+            app.scroll_up(3);
+            true
+        }
+        MouseEventKind::ScrollDown => {
+            app.scroll_down(3);
+            true
         }
         _ => false,
     }
@@ -423,5 +560,159 @@ mod tests {
 
         let narrow = format_status_bar(0, 100, true, 15);
         assert!(ViewportGeometry::display_width(&narrow) <= 15);
+    }
+
+    #[test]
+    fn test_pager_scroll_to_top_and_bottom() {
+        let mut app = PagerApp::new();
+        app.lines = (0..50).map(|i| format!("line {i}")).collect();
+        app.update_scroll_to_bottom(10);
+        assert_eq!(app.scroll, 40);
+        assert!(app.auto_scroll);
+
+        app.scroll_to_top();
+        assert_eq!(app.scroll, 0);
+        assert!(!app.auto_scroll);
+
+        app.scroll_to_bottom();
+        assert_eq!(app.scroll, 40);
+        assert!(app.auto_scroll);
+    }
+
+    #[test]
+    fn test_pager_scroll_half_pages() {
+        let mut app = PagerApp::new();
+        app.lines = (0..50).map(|i| format!("line {i}")).collect();
+        app.visible_height = 20;
+        app.scroll = 20;
+
+        app.scroll_half_page_up();
+        assert_eq!(app.scroll, 10);
+
+        app.scroll_half_page_down();
+        assert_eq!(app.scroll, 20);
+    }
+
+    #[test]
+    fn test_handle_key_event_extended_keys() {
+        let mut app = PagerApp::new();
+        app.lines = (0..50).map(|i| format!("line {i}")).collect();
+        app.visible_height = 10;
+        app.scroll = 20;
+
+        // vim navigation
+        assert!(!handle_key_event(&mut app, KeyCode::Char('k')));
+        assert_eq!(app.scroll, 19);
+
+        assert!(!handle_key_event(&mut app, KeyCode::Char('j')));
+        assert_eq!(app.scroll, 20);
+
+        // top / bottom
+        assert!(!handle_key_event(&mut app, KeyCode::Char('g')));
+        assert_eq!(app.scroll, 0);
+
+        assert!(!handle_key_event(&mut app, KeyCode::Char('G')));
+        assert_eq!(app.scroll, 40);
+
+        // Space / f (page down) and b (page up)
+        assert!(!handle_key_event(&mut app, KeyCode::Char('b')));
+        assert_eq!(app.scroll, 30);
+
+        assert!(!handle_key_event(&mut app, KeyCode::Char('f')));
+        assert_eq!(app.scroll, 40);
+
+        assert!(!handle_key_event(&mut app, KeyCode::Char(' ')));
+        assert_eq!(app.scroll, 40);
+
+        // half page u / d
+        assert!(!handle_key_event(&mut app, KeyCode::Char('u')));
+        assert_eq!(app.scroll, 35);
+
+        assert!(!handle_key_event(&mut app, KeyCode::Char('d')));
+        assert_eq!(app.scroll, 40);
+    }
+
+    #[test]
+    fn test_handle_key_press_ctrl_combinations() {
+        let mut app = PagerApp::new();
+        app.lines = (0..50).map(|i| format!("line {i}")).collect();
+        app.visible_height = 10;
+        app.scroll = 20;
+
+        // Ctrl-c -> quit
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(handle_key_press(&mut app, ctrl_c));
+
+        // Ctrl-u -> half page up
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(!handle_key_press(&mut app, ctrl_u));
+        assert_eq!(app.scroll, 15);
+
+        // Ctrl-d -> half page down
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(!handle_key_press(&mut app, ctrl_d));
+        assert_eq!(app.scroll, 20);
+
+        // Release event -> ignored
+        let mut release_key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        release_key.kind = KeyEventKind::Release;
+        assert!(!handle_key_press(&mut app, release_key));
+    }
+
+    #[test]
+    fn test_handle_mouse_event() {
+        let mut app = PagerApp::new();
+        app.lines = (0..50).map(|i| format!("line {i}")).collect();
+        app.visible_height = 10;
+        app.scroll = 20;
+
+        let mouse_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_event(&mut app, mouse_up));
+        assert_eq!(app.scroll, 17);
+
+        let mouse_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(handle_mouse_event(&mut app, mouse_down));
+        assert_eq!(app.scroll, 20);
+
+        let mouse_moved = MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!handle_mouse_event(&mut app, mouse_moved));
+    }
+
+    #[test]
+    fn test_process_terminal_event() {
+        let mut app = PagerApp::new();
+
+        let quit_key = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert_eq!(
+            process_terminal_event(&mut app, &quit_key),
+            TerminalEventOutcome::Quit
+        );
+
+        let resize_event = Event::Resize(100, 40);
+        assert_eq!(
+            process_terminal_event(&mut app, &resize_event),
+            TerminalEventOutcome::Redraw
+        );
+
+        let focus_lost = Event::FocusLost;
+        assert_eq!(
+            process_terminal_event(&mut app, &focus_lost),
+            TerminalEventOutcome::NoEvent
+        );
     }
 }
