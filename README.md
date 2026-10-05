@@ -54,20 +54,20 @@ cargo install strmaid
 *(Le binaire `strmaid` est directement installé dans `~/.cargo/bin/`).*
 
 ### 2. Binaires autonomes précompilés (Sans runtime Rust)
-Téléchargez l'archive correspondant à votre architecture depuis la page [**GitHub Releases v0.3.0**](https://github.com/ebedy/strmaid/releases/tag/v0.3.0) :
+Téléchargez l'archive correspondant à votre architecture depuis la page [**GitHub Releases v0.4.0**](https://github.com/ebedy/strmaid/releases/tag/v0.4.0) :
 
 | Plateforme | Cible | Téléchargement |
 | :--- | :--- | :--- |
-| **Linux (glibc)** | `x86_64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.3.0/strmaid-v0.3.0-x86_64-unknown-linux-gnu.tar.gz) |
-| **Linux (musl statique)** | `x86_64-unknown-linux-musl` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.3.0/strmaid-v0.3.0-x86_64-unknown-linux-musl.tar.gz) |
-| **Linux ARM64** | `aarch64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.3.0/strmaid-v0.3.0-aarch64-unknown-linux-gnu.tar.gz) |
-| **macOS Apple Silicon** | `aarch64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.3.0/strmaid-v0.3.0-aarch64-apple-darwin.tar.gz) |
-| **macOS Intel** | `x86_64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.3.0/strmaid-v0.3.0-x86_64-apple-darwin.tar.gz) |
-| **Windows x64** | `x86_64-pc-windows-msvc` | [Archive .zip](https://github.com/ebedy/strmaid/releases/download/v0.3.0/strmaid-v0.3.0-x86_64-pc-windows-msvc.zip) |
+| **Linux (glibc)** | `x86_64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.4.0/strmaid-v0.4.0-x86_64-unknown-linux-gnu.tar.gz) |
+| **Linux (musl statique)** | `x86_64-unknown-linux-musl` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.4.0/strmaid-v0.4.0-x86_64-unknown-linux-musl.tar.gz) |
+| **Linux ARM64** | `aarch64-unknown-linux-gnu` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.4.0/strmaid-v0.4.0-aarch64-unknown-linux-gnu.tar.gz) |
+| **macOS Apple Silicon** | `aarch64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.4.0/strmaid-v0.4.0-aarch64-apple-darwin.tar.gz) |
+| **macOS Intel** | `x86_64-apple-darwin` | [Archive .tar.gz](https://github.com/ebedy/strmaid/releases/download/v0.4.0/strmaid-v0.4.0-x86_64-apple-darwin.tar.gz) |
+| **Windows x64** | `x86_64-pc-windows-msvc` | [Archive .zip](https://github.com/ebedy/strmaid/releases/download/v0.4.0/strmaid-v0.4.0-x86_64-pc-windows-msvc.zip) |
 
 ```bash
 # Exemple d'installation sous Linux / macOS :
-tar -xzf strmaid-v0.3.0-*.tar.gz
+tar -xzf strmaid-v0.4.0-*.tar.gz
 sudo mv strmaid /usr/local/bin/
 ```
 
@@ -116,6 +116,10 @@ strmaid [OPTIONS] [FILE]
 | `--no-pager` | *Aucun* | Désactive le pager et force le mode filtre Unix composable (`stdout`). |
 | `-g`, `--graphics` | `kitty` \| `halfblocks` \| `asciibox` \| `raw` | Force le protocole graphique. Auto-détecté par défaut selon l'environnement. |
 | `-t`, `--theme` | `dark` \| `light` \| `neutral` \| `amber` \| `phosphor` \| `neon` \| `mono` | Définit le thème visuel pour les diagrammes (par défaut : `dark`). |
+| `--engine` | `mermaid-svg` \| `merman` | Moteur de rendu Mermaid (`mermaid-svg` par défaut, `merman` disponible avec la feature `merman`). |
+| `--no-auto-orient` | *Aucun* | Désactive l'auto-orientation préventive (`LR`/`RL` $\rightarrow$ `TD`) sur terminaux étroits (< 120 cols). |
+| `--timeout-ms` | `MS` | Délai maximal d'exécution d'un rendu de diagramme en millisecondes (par défaut : `5000`, `0` pour désactiver). |
+| `--no-fallback-asciibox` | *Aucun* | Désactive le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique et restitue le code brut. |
 | `--format` | `human` \| `json` \| `ndjson` | Format de sortie des flux analysés (par défaut : `human`). |
 | `-h`, `--help` | *Aucun* | Affiche l'aide de la commande. |
 | `-V`, `--version` | *Aucun* | Affiche la version de l'application. |
@@ -295,9 +299,13 @@ printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion
 Lorsque le mode Pager interactif est actif :
 - `↑` / `k` : Défilement d'une ligne vers le haut.
 - `↓` / `j` : Défilement d'une ligne vers le bas.
-- `Page Up` : Défilement rapide vers le haut.
-- `Page Down` : Défilement rapide vers le bas.
-- `q` ou `Esc` : Quitter le pager et revenir au shell.
+- `Page Up` / `b` : Défilement d'une page entière vers le haut.
+- `Page Down` / `Space` / `f` : Défilement d'une page entière vers le bas.
+- `u` / `d` : Défilement d'une demi-page vers le haut / bas.
+- `Home` / `g` : Saut immédiat au début du document.
+- `End` / `G` : Saut immédiat à la fin du document.
+- Molette de souris : Défilement vertical fluide.
+- `q`, `Esc` ou `Ctrl-c` : Quitter le pager et revenir au shell.
 
 ---
 
