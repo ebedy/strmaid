@@ -104,6 +104,10 @@ pub fn analyze_and_render_diagram(
     index: usize,
 ) -> JsonStreamItem {
     let effective_options = resolve_effective_options(diagram, options);
+    if effective_options.protocol == GraphicsProtocol::AsciiBox {
+        return render_asciibox_to_json_item(diagram, effective_options, index);
+    }
+
     match mermaid::render_to_svg_detailed(diagram, effective_options.theme) {
         Ok(svg) => render_svg_to_json_item(&svg, diagram, effective_options, index),
         Err(err_detail) => JsonStreamItem::Diagram {
@@ -112,6 +116,38 @@ pub fn analyze_and_render_diagram(
             title: diagram.title().map(ToString::to_string),
             dimensions: None,
             protocol: None,
+            payload: None,
+            error: Some(err_detail),
+            raw_content: diagram.as_str().to_string(),
+        },
+    }
+}
+
+fn render_asciibox_to_json_item(
+    diagram: &DiagramBlock,
+    options: RenderOptions,
+    index: usize,
+) -> JsonStreamItem {
+    let target_cols = options.viewport.columns.max(10);
+    let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
+
+    match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
+        Ok(text) => JsonStreamItem::Diagram {
+            index,
+            valid: true,
+            title: diagram.title().map(ToString::to_string),
+            dimensions: None,
+            protocol: Some(GraphicsProtocol::AsciiBox),
+            payload: Some(text),
+            error: None,
+            raw_content: diagram.as_str().to_string(),
+        },
+        Err(err_detail) => JsonStreamItem::Diagram {
+            index,
+            valid: false,
+            title: diagram.title().map(ToString::to_string),
+            dimensions: None,
+            protocol: Some(GraphicsProtocol::AsciiBox),
             payload: None,
             error: Some(err_detail),
             raw_content: diagram.as_str().to_string(),
@@ -191,6 +227,15 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
         return (format!("{title_prefix}{cached_payload}"), is_valid);
     }
 
+    if effective_options.protocol == GraphicsProtocol::AsciiBox {
+        let (output, is_valid, raw_payload) =
+            render_asciibox_to_terminal(diagram, effective_options);
+        if is_valid {
+            RenderCache::global().insert(cache_key, (raw_payload, true));
+        }
+        return (output, is_valid);
+    }
+
     match mermaid::render_to_svg(diagram, effective_options.theme) {
         Ok(svg) => {
             let (rendered, is_valid, raw_encoded) =
@@ -201,6 +246,27 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
             (rendered, is_valid)
         }
         Err(err) => (format_fallback(diagram, &err), false),
+    }
+}
+
+fn render_asciibox_to_terminal(
+    diagram: &DiagramBlock,
+    options: RenderOptions,
+) -> (String, bool, String) {
+    let target_cols = options.viewport.columns.max(10);
+    let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
+
+    match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
+        Ok(text) => {
+            let title_prefix = diagram
+                .title()
+                .map_or_else(String::new, |t| format_title_header(t, target_cols));
+            (format!("{title_prefix}{text}"), true, text)
+        }
+        Err(err_detail) => {
+            let cli_err = CliError::MermaidSyntax(err_detail.message);
+            (format_fallback(diagram, &cli_err), false, String::new())
+        }
     }
 }
 
@@ -319,6 +385,24 @@ mod tests {
         let output = render_diagram(&block, options);
         assert_ne!(output, "");
         assert!(!output.contains("Rendu Mermaid indisponible"));
+        assert!(output.contains('A'));
+        assert!(output.contains('B'));
+        assert!(output.chars().any(|c| c == '┌' || c == '│' || c == '└'));
+    }
+
+    #[test]
+    fn test_render_diagram_asciibox_state_diagram() {
+        let block =
+            DiagramBlock::new("stateDiagram-v2\n  [*] --> Still\n  Still --> [*]".to_string());
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(80, 24),
+        );
+        let (output, is_valid) = render_diagram_checked(&block, options);
+        assert!(is_valid);
+        assert!(output.contains("Still"));
+        assert!(output.chars().any(|c| c == '┌' || c == '│' || c == '└'));
     }
 
     #[test]
