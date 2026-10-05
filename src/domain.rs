@@ -24,10 +24,10 @@ impl ThemeMode {
         match name.to_ascii_lowercase().as_str() {
             "light" => Self::Light,
             "neutral" => Self::Neutral,
-            "amber" => Self::Amber,
-            "phosphor" => Self::Phosphor,
-            "neon" => Self::Neon,
-            "mono" => Self::Mono,
+            "amber" | "retro-amber" => Self::Amber,
+            "phosphor" | "retro-phosphor" => Self::Phosphor,
+            "neon" | "retro-neon" => Self::Neon,
+            "mono" | "retro-mono" => Self::Mono,
             _ => Self::Dark,
         }
     }
@@ -775,10 +775,17 @@ mod tests {
         assert_eq!(ThemeMode::from_str_name("light"), ThemeMode::Light);
         assert_eq!(ThemeMode::from_str_name("neutral"), ThemeMode::Neutral);
         assert_eq!(ThemeMode::from_str_name("amber"), ThemeMode::Amber);
+        assert_eq!(ThemeMode::from_str_name("retro-amber"), ThemeMode::Amber);
         assert_eq!(ThemeMode::from_str_name("AMBER"), ThemeMode::Amber);
         assert_eq!(ThemeMode::from_str_name("phosphor"), ThemeMode::Phosphor);
+        assert_eq!(
+            ThemeMode::from_str_name("retro-phosphor"),
+            ThemeMode::Phosphor
+        );
         assert_eq!(ThemeMode::from_str_name("neon"), ThemeMode::Neon);
+        assert_eq!(ThemeMode::from_str_name("retro-neon"), ThemeMode::Neon);
         assert_eq!(ThemeMode::from_str_name("mono"), ThemeMode::Mono);
+        assert_eq!(ThemeMode::from_str_name("retro-mono"), ThemeMode::Mono);
         assert_eq!(ThemeMode::from_str_name("unknown"), ThemeMode::Dark);
 
         assert_eq!(ThemeMode::Dark.background_rgb(), (30, 30, 30));

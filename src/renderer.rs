@@ -318,7 +318,10 @@ fn render_svg_to_json_item(
     }
 }
 
-fn run_with_render_timeout<F, T>(f: F, timeout: Option<std::time::Duration>) -> Result<T, CliError>
+pub(crate) fn run_with_render_timeout<F, T>(
+    f: F,
+    timeout: Option<std::time::Duration>,
+) -> Result<T, CliError>
 where
     F: FnOnce() -> Result<T, CliError> + Send + 'static,
     T: Send + 'static,

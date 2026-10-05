@@ -1,6 +1,7 @@
 use crate::domain::{CliError, DiagramBlock, ResourceLimits, ThemeMode, strip_mermaid_fences};
 use crate::mermaid;
 use crate::rasterizer;
+use crate::renderer;
 use crate::stream::{StreamItem, StreamStateMachine};
 use base64::prelude::*;
 use resvg::tiny_skia::PixmapRef;
@@ -197,8 +198,10 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
                     "type": "object",
                     "properties": {
                         "source": { "type": "string", "description": "Code source du diagramme Mermaid" },
-                        "theme": { "type": "string", "description": "Thème visuel (dark, light, neutral, retro-amber, retro-phosphor, retro-neon, retro-mono)", "default": "dark" },
-                        "width": { "type": "integer", "description": "Largeur cible en colonnes", "default": 80 }
+                        "theme": { "type": "string", "description": "Thème visuel (dark, light, neutral, amber, phosphor, neon, mono - alias retro-* supportés)", "default": "dark" },
+                        "width": { "type": "integer", "description": "Largeur cible en colonnes (clampée entre 20 et 1000)", "default": 80 },
+                        "engine": { "type": "string", "description": "Moteur vectoriel Mermaid (mermaid-svg par défaut, merman si activé)", "default": "mermaid-svg" },
+                        "timeout_ms": { "type": "integer", "description": "Délai maximal d'exécution en millisecondes (défaut 5000, 0 pour désactiver)", "default": 5000 }
                     },
                     "required": ["source"]
                 }
@@ -249,14 +252,28 @@ fn handle_tools_call(id: Value, params: &Value) -> JsonRpcResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct McpRenderParams<'a> {
+    source: &'a str,
+    theme_name: Option<&'a str>,
+    width_col: Option<u64>,
+    engine_name: Option<&'a str>,
+    timeout_ms: Option<u64>,
+}
+
 fn call_strmaid_render(args: &Value) -> ToolCallResult {
     let Some(source) = args.get("source").and_then(Value::as_str) else {
         return make_tool_error("Paramètre requis manquant: 'source'");
     };
-    let theme_str = args.get("theme").and_then(Value::as_str);
-    let width_val = args.get("width").and_then(Value::as_u64);
+    let params = McpRenderParams {
+        source,
+        theme_name: args.get("theme").and_then(Value::as_str),
+        width_col: args.get("width").and_then(Value::as_u64),
+        engine_name: args.get("engine").and_then(Value::as_str),
+        timeout_ms: args.get("timeout_ms").and_then(Value::as_u64),
+    };
 
-    match render_diagram_to_mcp_payload(source, theme_str, width_val) {
+    match render_diagram_to_mcp_payload(&params) {
         Ok(output) => {
             let json_str = serde_json::to_string(&output).unwrap_or_default();
             let structured = serde_json::to_value(&output).ok();
@@ -273,19 +290,34 @@ fn call_strmaid_render(args: &Value) -> ToolCallResult {
     }
 }
 
-fn render_diagram_to_mcp_payload(
-    source: &str,
-    theme_name: Option<&str>,
-    width_col: Option<u64>,
-) -> Result<RenderOutput, String> {
-    let cleaned = strip_mermaid_fences(source);
-    let theme = theme_name.map_or(ThemeMode::Dark, ThemeMode::from_str_name);
+fn render_diagram_to_mcp_payload(params: &McpRenderParams<'_>) -> Result<RenderOutput, String> {
+    let cleaned = strip_mermaid_fences(params.source);
+    let theme = params
+        .theme_name
+        .map_or(ThemeMode::Dark, ThemeMode::from_str_name);
+    let engine_str = params.engine_name.unwrap_or("mermaid-svg");
+    let engine = mermaid::engine_by_name(engine_str).map_err(|e| e.to_string())?;
 
-    let target_cols = u16::try_from(width_col.unwrap_or(80).clamp(20, 1000)).unwrap_or(80);
+    let target_cols = u16::try_from(params.width_col.unwrap_or(80).clamp(20, 1000)).unwrap_or(80);
     let target_width_px = u32::from(target_cols).saturating_mul(8);
 
     let block = DiagramBlock::from_raw(&cleaned);
-    let svg = mermaid::render_to_svg(&block, theme).map_err(|e| e.to_string())?;
+    let timeout_dur = match params.timeout_ms {
+        Some(0) => None,
+        Some(ms) => Some(std::time::Duration::from_millis(ms)),
+        None => Some(std::time::Duration::from_millis(5000)),
+    };
+
+    let svg = renderer::run_with_render_timeout(
+        move || {
+            engine
+                .render_svg(&block, theme)
+                .map_err(|err| CliError::MermaidSyntax(err.message))
+        },
+        timeout_dur,
+    )
+    .map_err(|e| e.to_string())?;
+
     let rasterized = rasterizer::rasterize_svg(
         &svg,
         target_width_px,
@@ -544,5 +576,67 @@ mod tests {
         assert!(result["svg"].as_str().unwrap_or("").contains("<svg"));
         assert_ne!(result["png_base64"].as_str().unwrap_or(""), "");
         assert!(result["dimensions"]["width"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[test]
+    fn test_mcp_render_tool_with_engine_and_retro_theme() {
+        let input = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "strmaid_render",
+                "arguments": {
+                    "source": "flowchart TD\n  A --> B",
+                    "theme": "retro-amber",
+                    "engine": "mermaid-svg",
+                    "timeout_ms": 3000,
+                    "width": 80
+                }
+            }
+        });
+        let line = serde_json::to_string(&input).unwrap_or_default();
+        let mut output = Vec::new();
+        let res = run_mcp_server(Cursor::new(line), &mut output);
+        assert!(res.is_ok());
+
+        let out_str = String::from_utf8(output).unwrap_or_default();
+        let resp: JsonRpcResponse =
+            serde_json::from_str(&out_str).unwrap_or_else(|_| unreachable!());
+        let result = resp.result.unwrap_or(Value::Null);
+        assert_eq!(result["isError"], false);
+        assert!(result["svg"].as_str().unwrap_or("").contains("<svg"));
+    }
+
+    #[test]
+    fn test_mcp_render_tool_invalid_engine_reports_error() {
+        let input = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "strmaid_render",
+                "arguments": {
+                    "source": "flowchart TD\n  A --> B",
+                    "engine": "unknown-engine"
+                }
+            }
+        });
+        let line = serde_json::to_string(&input).unwrap_or_default();
+        let mut output = Vec::new();
+        let res = run_mcp_server(Cursor::new(line), &mut output);
+        assert!(res.is_ok());
+
+        let out_str = String::from_utf8(output).unwrap_or_default();
+        let resp: JsonRpcResponse =
+            serde_json::from_str(&out_str).unwrap_or_else(|_| unreachable!());
+        let result = resp.result.unwrap_or(Value::Null);
+        assert_eq!(result["isError"], true);
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Moteur Mermaid inconnu")
+        );
     }
 }
