@@ -1,6 +1,6 @@
 ---
 name: strmaid
-description: Native terminal rendering, syntax validation, MCP server, and structured analysis for Mermaid diagrams in streaming Markdown. Use whenever generating, inspecting, validating, or fixing Mermaid code, running the Strmaid MCP server, diagnosing terminal graphics capabilities, or previewing Markdown flows.
+description: Native terminal rendering, syntax validation, MCP server, and structured analysis for Mermaid diagrams in streaming Markdown. Use whenever generating, inspecting, validating, or fixing Mermaid code, running the Strmaid MCP server, diagnosing terminal graphics capabilities, managing render engines, or previewing Markdown flows.
 license: MIT OR Apache-2.0
 compatibility: Linux, macOS, or Windows (requires strmaid binary in PATH)
 metadata:
@@ -14,9 +14,11 @@ Ce skill fournit les procédures et directives permettant à un agent IA de pilo
 1. **Intégrer le serveur MCP natif (`strmaid mcp`)** pour le rendu vectoriel/matriciel (SVG, PNG Base64), la validation syntaxique et l'extraction de diagrammes via JSON-RPC 2.0.
 2. **Diagnostiquer les capacités du terminal hôte (`strmaid doctor`)** pour auditer l'environnement, le protocole graphique optimal et la géométrie avant tout affichage.
 3. **Valider et auto-corriger** la syntaxe de diagrammes Mermaid sans dépendance JavaScript ni navigateur headless (boucle de self-healing ultra-rapide < 10 ms).
-4. **Auditer la conformité** de documents Markdown contenant plusieurs blocs Mermaid via une sortie structurée machine-readable JSON ou NDJSON (streaming en continu).
-5. **Prévisualiser des diagrammes** directement dans la console ou dans les terminaux intégrés d'éditeurs (Neovim, VSCode, Helix) avec ajustement adaptatif au viewport et gestion de 7 thèmes visuels.
-6. **Intercepter les flux interactifs en pseudo-terminal (`strmaid run <cmd...>`)** pour visualiser dynamiquement les diagrammes générés par des CLI d'agents ou des scripts.
+4. **Piloter les moteurs de génération vectorielle (`--engine`)** en choisissant le moteur adapté (`mermaid-svg` par défaut, `merman` avec disposition ELK pour diagrammes complexes).
+5. **Garantir la résilience et l'adaptation au terminal** via l'auto-orientation adaptative (`--no-auto-orient`), les gardes temporelles (`--timeout-ms`) et le repli intelligent vers `AsciiBox` (`--no-fallback-asciibox`).
+6. **Auditer la conformité** de documents Markdown contenant plusieurs blocs Mermaid via une sortie structurée machine-readable JSON ou NDJSON (streaming en continu).
+7. **Prévisualiser des diagrammes** directement dans la console ou dans les terminaux intégrés d'éditeurs (Neovim, VSCode, Helix) avec ajustement adaptatif au viewport et gestion de 7 thèmes visuels.
+8. **Intercepter les flux interactifs en pseudo-terminal (`strmaid run <cmd...>`)** pour visualiser dynamiquement les diagrammes générés par des CLI d'agents (ex. Antigravity `agy`, Claude Code) ou des scripts.
 
 ---
 
@@ -43,7 +45,7 @@ cargo install --path /chemin/vers/strmaid
 
 ## 2. Intégration Native Model Context Protocol (MCP Server Mode)
 
-`strmaid` implémente nativement un serveur **Model Context Protocol (MCP)** standardisé via standard I/O (JSON-RPC 2.0). C'est le mode d'intégration recommandé pour les agents d'IA (Antigravity `agy`, Claude Desktop, Cursor, Cline).
+`strmaid` implémente nativement un serveur **Model Context Protocol (MCP)** standardisé via standard I/O (JSON-RPC 2.0). C'est le mode d'intégration recommandé pour les agents d'IA (Antigravity `agy`, Claude Desktop, Cursor, Windsurf, Cline).
 
 ### Configuration Client MCP
 
@@ -92,7 +94,7 @@ Génère le SVG vectoriel et le raster PNG encodé en Base64 avec les dimensions
 - **Paramètres :**
   - `source` *(string, requis)* : Le code source du diagramme Mermaid.
   - `theme` *(string, optionnel)* : Thème visuel (`dark`, `light`, `neutral`, `amber`, `phosphor`, `neon`, `mono` - par défaut `dark`).
-  - `width` *(integer, optionnel)* : Largeur cible en colonnes pour contraindre les dimensions.
+  - `width` *(integer, optionnel)* : Largeur cible en colonnes pour contraindre les dimensions (clampé automatiquement entre 20 et 1000 colonnes, défaut 80).
 - **Sortie structurée :**
   ```json
   {
@@ -209,11 +211,13 @@ Pour analyser la conformité globale de l'ensemble des diagrammes d'un document 
 strmaid path/to/document.md --format json
 ```
 
-Le document JSON retourné détaille quantitativement l'état de chaque bloc :
+Le document JSON retourné correspond à la structure `JsonDocumentOutput` et détaille quantitativement l'état de chaque bloc :
 ```json
 {
   "version": "0.4.0",
   "format": "json",
+  "theme": "dark",
+  "protocol": "halfblocks",
   "summary": {
     "total_items": 5,
     "total_diagrams": 2,
@@ -225,8 +229,11 @@ Le document JSON retourné détaille quantitativement l'état de chaque bloc :
       "type": "diagram",
       "index": 0,
       "valid": true,
+      "title": "Architecture Principale",
       "dimensions": { "width": 640, "height": 320 },
-      "protocol": "halfblocks"
+      "protocol": "halfblocks",
+      "payload": "\u001b[38;2;...▀...",
+      "raw_content": "flowchart TD\n  A --> B"
     },
     {
       "type": "diagram",
@@ -253,30 +260,58 @@ Chaque bloc ou élément textuel est émis immédiatement sur `stdout` sous form
 
 ---
 
-## 6. Procédure de Rendu Visuel Terminal
+## 6. Moteurs de Rendu, Résilience & Affichage Terminal
 
-Pour afficher un diagramme sous forme visuelle dans le terminal sans bloquer l'invite de commande (mode non-interactif) :
+### A. Choix du Moteur de Rendu (`--engine`)
+`strmaid` découple l'interface de génération vectorielle via le trait `DiagramEngine` :
+- `--engine mermaid-svg` (défaut) : Moteur natif Rust ultra-léger et rapide (< 10 ms), sans runtime JS.
+- `--engine merman` : Moteur alternatif s'appuyant sur `merman` (layout ELK, standard Zed), recommandé pour les diagrammes d'architecture très denses ou imbriqués (nécessite la compilation avec `--features merman`).
 
-### A. Protocoles graphiques supportés (`-g`, `--graphics`)
+```bash
+# Rendu avec le moteur Merman :
+strmaid --engine merman architecture.md
+```
+
+### B. Auto-Orientation Adaptative (`--no-auto-orient`)
+Pour éviter que les diagrammes horizontaux (`flowchart LR`, `graph LR`, `RL`) ne soient tronqués ou compressés horizontalement sur des terminaux étroits, `strmaid` inspecte la géométrie disponible :
+- Si la largeur effective est **inférieure à 120 colonnes**, l'orientation est automatiquement convertie en **`TD`** (Top-Down).
+- Pour désactiver ce comportement et forcer l'orientation d'origine :
+  ```bash
+  strmaid --no-auto-orient diagram.md
+  ```
+
+### C. Garde Temporelle Anti-Blocage (`--timeout-ms`)
+Afin d'éviter tout gel indéfini du terminal ou du pipeline de streaming face à des diagrammes pathologiques ou des boucles récursives de layout :
+- Par défaut, un timeout strict de **5000 ms** est appliqué par diagramme.
+- Ce délai est configurable ou désactivable (via `0`) :
+  ```bash
+  strmaid --timeout-ms 2000 flux.md
+  ```
+
+### D. Repli Résilient Intelligent vers AsciiBox (`--no-fallback-asciibox`)
+Lorsqu'un rendu matriciel haute fidélité échoue en cours de route (ex. dépassement de la limite de mémoire de rasterisation ou contraintes mémoire extrêmes) :
+- `strmaid` ne crashe jamais : il bascule automatiquement sur un repli sémantique **`AsciiBox`** (art Unicode / Box-Drawing) en émettant un avertissement explicite.
+- Pour interdire ce repli et restituer le code brut en cas d'échec graphique :
+  ```bash
+  strmaid --no-fallback-asciibox diagram.md
+  ```
+
+### E. Protocoles Graphiques Supportés (`-g`, `--graphics`)
 - `kitty` : Rendu natif GPU pixel-perfect pour Warp, Kitty, WezTerm, Ghostty.
 - `iterm2` : Protocole d'affichage d'images pour iTerm2 et terminaux compatibles macOS.
 - `halfblocks` : Repli universel demi-blocs Unicode (`▀`, `▄`) TrueColor 24-bit (compatible Windows Terminal, PowerShell, CMD, et tous terminaux Linux/macOS modernes).
-- `asciibox` : Repli en art Unicode/Braille / ASCII box-drawing pour terminaux contraints, sessions SSH anciennes ou logs CI monochromes.
-- `raw` : Sortie brute non encapsulée.
+- `asciibox` : Repli sémantique en art Unicode / ASCII box-drawing pour terminaux contraints, sessions SSH anciennes ou logs CI monochromes.
+- `raw` : Sortie brute vectorielle SVG sans conversion matricielle.
 
-Exemples :
 ```bash
 # Rendu demi-blocs TrueColor 24-bit calibré à 80 colonnes :
 strmaid --block-only --width 80 diagram.mmd
 
-# Rendu iTerm2 explicite :
-strmaid --block-only --graphics iterm2 diagram.mmd
-
-# Repli en art Unicode/Braille pour sessions SSH dégradées ou CI monochrome :
+# Repli en art Unicode box-drawing pour sessions SSH dégradées ou CI monochrome :
 strmaid --block-only --width 60 --graphics asciibox diagram.mmd
 ```
 
-### B. Adaptation aux thèmes visuels (`-t`, `--theme`)
+### F. Thèmes Visuels (`-t`, `--theme`)
 Sélectionner la palette adéquate selon le contexte :
 - `--theme dark` (défaut) : Contraste optimisé pour terminaux à fond sombre.
 - `--theme light` : Palette adaptée aux fonds clairs ou blancs.
@@ -288,7 +323,27 @@ Sélectionner la palette adéquate selon le contexte :
 
 ---
 
-## 7. Streaming Markdown et Interception Interactive PTY
+## 7. Directives de Modélisation Mermaid Terminal-Safe pour Agents IA
+
+Lorsqu'un agent IA conçoit un diagramme Mermaid destiné à être restitué dans un terminal ou via `strmaid`, il doit obligatoirement appliquer les règles suivantes pour garantir une lisibilité optimale et éviter tout dépassement :
+
+1. **Plafond strict de largeur unitaire :**
+   - Interdiction formelle des lignes de libellé de nœud excédant 30 caractères.
+   - Utiliser systématiquement des sauts de ligne explicites `<br/>` pour compacter verticalement le texte des nœuds :
+     ```mermaid
+     flowchart TD
+         A["Analyse initiale<br/>du flux entrant"] --> B["Génération SVG<br/>vectorielle"]
+     ```
+2. **Orientation verticale privilégiée :**
+   - Déclarer préférentiellement `flowchart TD` ou `graph TD` pour les chaînes de travail afin de minimiser l'étalement horizontal sur les terminaux fenêtrés.
+3. **Calibrage pour 80 colonnes :**
+   - L'encombrement horizontal global calculé du graphe ne doit jamais dépasser 80 colonnes pour éviter tout déclenchement de repli dégradé en bloc de code brut.
+4. **Sobriété et concision sémantique :**
+   - Les nœuds ne doivent contenir que l'intitulé fonctionnel majeur et son composant technique. Les détails d'implémentation fins doivent figurer dans le texte Markdown environnant.
+
+---
+
+## 8. Streaming Markdown et Interception Interactive PTY
 
 ### A. Pipeline de streaming direct
 Pour consommer et afficher un flux Markdown en temps réel émis par un processus tiers ou un LLM dans un pipeline Unix :
@@ -297,7 +352,7 @@ commande_source | strmaid --no-pager
 ```
 
 ### B. Intercepteur interactif en pseudo-terminal (`strmaid run`)
-Pour exécuter une session interactive (ex. CLI d'un agent IA, REPL) au sein d'un pseudo-terminal (PTY) tout en interceptant automatiquement les diagrammes Mermaid au vol pour les afficher directement en graphisme terminal :
+Pour exécuter une session interactive (ex. CLI d'un agent IA, REPL) au sein d'un pseudo-terminal (PTY Unix ou ConPTY Windows) tout en interceptant automatiquement les diagrammes Mermaid au vol pour les afficher directement en graphisme terminal :
 ```bash
 # Exécute un CLI d'agent (ex. Antigravity agy) dans un PTY avec rendu inline des diagrammes Mermaid :
 strmaid run agy
