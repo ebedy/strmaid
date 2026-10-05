@@ -117,6 +117,7 @@ fn build_render_options(args: &CliArgs) -> RenderOptions {
     RenderOptions::with_all(theme, protocol, viewport, limits, args.format)
         .with_auto_orient(!args.no_auto_orient)
         .with_engine(args.engine)
+        .with_fallback_asciibox(!args.no_fallback_asciibox)
 }
 
 fn execute_with_reader<R: BufRead + Send + 'static>(

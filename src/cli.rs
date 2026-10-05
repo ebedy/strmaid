@@ -70,6 +70,10 @@ pub struct CliArgs {
     /// Délai maximal d'exécution d'un rendu de diagramme en millisecondes (0 pour désactiver).
     #[arg(long = "timeout-ms", value_name = "MS", default_value_t = 5000)]
     pub timeout_ms: u64,
+
+    /// Désactiver le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique.
+    #[arg(long = "no-fallback-asciibox")]
+    pub no_fallback_asciibox: bool,
 }
 
 /// Sous-commandes disponibles pour `strmaid`.
@@ -369,5 +373,18 @@ mod tests {
         assert!(args_custom.is_ok());
         let parsed_custom = args_custom.unwrap_or_else(|_| unreachable!());
         assert_eq!(parsed_custom.timeout_ms, 1500);
+    }
+
+    #[test]
+    fn test_cli_parse_no_fallback_asciibox() {
+        let args_default = CliArgs::try_parse_from(["strmaid"]);
+        assert!(args_default.is_ok());
+        let parsed_default = args_default.unwrap_or_else(|_| unreachable!());
+        assert!(!parsed_default.no_fallback_asciibox);
+
+        let args_flag = CliArgs::try_parse_from(["strmaid", "--no-fallback-asciibox"]);
+        assert!(args_flag.is_ok());
+        let parsed_flag = args_flag.unwrap_or_else(|_| unreachable!());
+        assert!(parsed_flag.no_fallback_asciibox);
     }
 }

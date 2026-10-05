@@ -20,6 +20,7 @@ pub struct RenderOptions {
     pub format: OutputFormat,
     pub auto_orient: bool,
     pub engine: DiagramEngineType,
+    pub fallback_asciibox: bool,
 }
 
 impl Default for RenderOptions {
@@ -43,6 +44,7 @@ impl RenderOptions {
             format: OutputFormat::Human,
             auto_orient: true,
             engine: DiagramEngineType::default(),
+            fallback_asciibox: true,
         }
     }
 
@@ -61,6 +63,7 @@ impl RenderOptions {
             format: OutputFormat::Human,
             auto_orient: true,
             engine: DiagramEngineType::MermaidSvg,
+            fallback_asciibox: true,
         }
     }
 
@@ -80,6 +83,7 @@ impl RenderOptions {
             format,
             auto_orient: true,
             engine: DiagramEngineType::MermaidSvg,
+            fallback_asciibox: true,
         }
     }
 
@@ -100,6 +104,12 @@ impl RenderOptions {
         self.engine = engine;
         self
     }
+
+    #[must_use]
+    pub const fn with_fallback_asciibox(mut self, fallback_asciibox: bool) -> Self {
+        self.fallback_asciibox = fallback_asciibox;
+        self
+    }
 }
 
 fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> RenderOptions {
@@ -118,6 +128,7 @@ fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> 
         format: options.format,
         auto_orient: options.auto_orient,
         engine: options.engine,
+        fallback_asciibox: options.fallback_asciibox,
     }
 }
 
@@ -158,25 +169,7 @@ pub fn analyze_and_render_diagram(
             let item = if effective_options.protocol == GraphicsProtocol::AsciiBox {
                 render_asciibox_to_json_item(&render_target, effective_options, index)
             } else {
-                match mermaid::render_to_svg_detailed_with_engine(
-                    &render_target,
-                    effective_options.theme,
-                    effective_options.engine,
-                ) {
-                    Ok(svg) => {
-                        render_svg_to_json_item(&svg, &render_target, effective_options, index)
-                    }
-                    Err(err_detail) => JsonStreamItem::Diagram {
-                        index,
-                        valid: false,
-                        title: render_target.title().map(ToString::to_string),
-                        dimensions: None,
-                        protocol: None,
-                        payload: None,
-                        error: Some(err_detail),
-                        raw_content: render_target.as_str().to_string(),
-                    },
-                }
+                render_svg_or_fallback_json_item(&render_target, effective_options, index)
             };
             Ok(item)
         },
@@ -205,6 +198,38 @@ pub fn analyze_and_render_diagram(
         *raw_content = raw_source;
     }
     item
+}
+
+fn render_svg_or_fallback_json_item(
+    render_target: &DiagramBlock,
+    options: RenderOptions,
+    index: usize,
+) -> JsonStreamItem {
+    match mermaid::render_to_svg_detailed_with_engine(render_target, options.theme, options.engine)
+    {
+        Ok(svg) => {
+            let item = render_svg_to_json_item(&svg, render_target, options, index);
+            if matches!(item, JsonStreamItem::Diagram { valid: false, .. })
+                && options.fallback_asciibox
+            {
+                let ascii_item = render_asciibox_to_json_item(render_target, options, index);
+                if matches!(ascii_item, JsonStreamItem::Diagram { valid: true, .. }) {
+                    return ascii_item;
+                }
+            }
+            item
+        }
+        Err(err_detail) => JsonStreamItem::Diagram {
+            index,
+            valid: false,
+            title: render_target.title().map(ToString::to_string),
+            dimensions: None,
+            protocol: None,
+            payload: None,
+            error: Some(err_detail),
+            raw_content: render_target.as_str().to_string(),
+        },
+    }
 }
 
 fn render_asciibox_to_json_item(
@@ -353,13 +378,7 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
                     effective_options,
                 ))
             } else {
-                let svg = mermaid::render_to_svg_with_engine(
-                    &diag_for_render,
-                    effective_options.theme,
-                    effective_options.engine,
-                )?;
-                Ok(render_svg_to_terminal_with_raw(
-                    &svg,
+                Ok(render_graphical_with_fallback(
                     &diag_for_render,
                     effective_options,
                 ))
@@ -376,6 +395,46 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
             (output, is_valid)
         }
         Err(err) => (format_fallback(diagram, &err), false),
+    }
+}
+
+fn render_asciibox_fallback(
+    diagram: &DiagramBlock,
+    options: RenderOptions,
+    original_err: &CliError,
+) -> (String, bool, String) {
+    let target_cols = options.viewport.columns.max(10);
+    let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
+    match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
+        Ok(text) => {
+            let title_prefix = diagram
+                .title()
+                .map_or_else(String::new, |t| format_title_header(t, target_cols));
+            let warning = format!(
+                "\x1b[33m⚠️  [Rendu graphique indisponible: {original_err}; repli automatique en mode AsciiBox]\x1b[0m\n"
+            );
+            (format!("{warning}{title_prefix}{text}"), true, text)
+        }
+        Err(_) => (format_fallback(diagram, original_err), false, String::new()),
+    }
+}
+
+fn render_graphical_with_fallback(
+    diagram: &DiagramBlock,
+    options: RenderOptions,
+) -> (String, bool, String) {
+    let render_result = mermaid::render_to_svg_with_engine(diagram, options.theme, options.engine)
+        .and_then(|svg| render_svg_to_terminal_with_raw(&svg, diagram, options));
+
+    match render_result {
+        Ok((output, raw_payload)) => (output, true, raw_payload),
+        Err(err) => {
+            if options.fallback_asciibox && !matches!(err, CliError::MermaidSyntax(_)) {
+                render_asciibox_fallback(diagram, options, &err)
+            } else {
+                (format_fallback(diagram, &err), false, String::new())
+            }
+        }
     }
 }
 
@@ -411,26 +470,22 @@ fn render_svg_to_terminal_with_raw(
     svg: &str,
     diagram: &DiagramBlock,
     options: RenderOptions,
-) -> (String, bool, String) {
+) -> Result<(String, String), CliError> {
     if options.protocol == GraphicsProtocol::Raw {
         let raw = format!("{svg}\n");
-        return (raw.clone(), true, raw);
+        return Ok((raw.clone(), raw));
     }
 
     let target_cols = options.viewport.columns.max(10);
     let target_width_px = u32::from(target_cols) * 8;
 
-    match rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels) {
-        Ok(image) => {
-            let image = composite_on_theme_background(image, options.theme);
-            let encoded = encode_image_for_protocol(&image, options);
-            let title_prefix = diagram
-                .title()
-                .map_or_else(String::new, |t| format_title_header(t, target_cols));
-            (format!("{title_prefix}{encoded}"), true, encoded)
-        }
-        Err(err) => (format_fallback(diagram, &err), false, String::new()),
-    }
+    let image = rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels)?;
+    let image = composite_on_theme_background(image, options.theme);
+    let encoded = encode_image_for_protocol(&image, options);
+    let title_prefix = diagram
+        .title()
+        .map_or_else(String::new, |t| format_title_header(t, target_cols));
+    Ok((format!("{title_prefix}{encoded}"), encoded))
 }
 
 fn format_title_header(title: &str, target_cols: u16) -> String {
@@ -795,6 +850,74 @@ mod tests {
                 assert!(!valid);
                 let err = error.unwrap_or_else(|| unreachable!());
                 assert_eq!(err.kind, Some("RenderTimeout".to_string()));
+            }
+            JsonStreamItem::Text { .. } => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn test_render_diagram_raster_limit_triggers_asciibox_fallback() {
+        let block = DiagramBlock::new("graph TD\n  RasterLimitA --> RasterLimitB".to_string());
+        let limits = ResourceLimits {
+            max_raster_pixels: 1,
+            ..ResourceLimits::default()
+        };
+        let options = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            limits,
+        );
+
+        let (output, valid) = render_diagram_checked(&block, options);
+        assert!(valid, "Fallback to AsciiBox must be considered valid");
+        assert!(output.contains("repli automatique en mode AsciiBox"));
+        assert!(output.contains("RasterLimitA"));
+        assert!(output.contains("RasterLimitB"));
+    }
+
+    #[test]
+    fn test_render_diagram_raster_limit_with_no_fallback_asciibox() {
+        let block = DiagramBlock::new("graph TD\n  NoFallbackA --> NoFallbackB".to_string());
+        let limits = ResourceLimits {
+            max_raster_pixels: 1,
+            ..ResourceLimits::default()
+        };
+        let options = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            limits,
+        )
+        .with_fallback_asciibox(false);
+
+        let (output, valid) = render_diagram_checked(&block, options);
+        assert!(!valid, "Must not be valid without AsciiBox fallback");
+        assert!(output.contains("Rendu Mermaid indisponible"));
+        assert!(output.contains("NoFallbackA --> NoFallbackB"));
+    }
+
+    #[test]
+    fn test_analyze_and_render_diagram_raster_limit_triggers_asciibox_fallback() {
+        let block = DiagramBlock::new("graph TD\n  JsonFallbackA --> JsonFallbackB".to_string());
+        let limits = ResourceLimits {
+            max_raster_pixels: 1,
+            ..ResourceLimits::default()
+        };
+        let options = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            limits,
+        );
+
+        let item = analyze_and_render_diagram(&block, options, 0);
+        match item {
+            JsonStreamItem::Diagram {
+                valid, protocol, ..
+            } => {
+                assert!(valid);
+                assert_eq!(protocol, Some(GraphicsProtocol::AsciiBox));
             }
             JsonStreamItem::Text { .. } => unreachable!(),
         }
