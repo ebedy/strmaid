@@ -4,7 +4,7 @@ description: Native terminal rendering, syntax validation, MCP server, and struc
 license: MIT OR Apache-2.0
 compatibility: Linux, macOS, or Windows (requires strmaid binary in PATH)
 metadata:
-  version: "0.2.0"
+  version: "0.3.0"
   repository: https://github.com/ebedy/strmaid
 ---
 
@@ -212,7 +212,7 @@ strmaid path/to/document.md --format json
 Le document JSON retourné détaille quantitativement l'état de chaque bloc :
 ```json
 {
-  "version": "0.2.0",
+  "version": "0.3.0",
   "format": "json",
   "summary": {
     "total_items": 5,
