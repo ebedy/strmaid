@@ -5,6 +5,7 @@ use std::path::PathBuf;
 /// Strmaid: Rendu fluide de flux Markdown et diagrammes Mermaid en terminal.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct CliArgs {
     /// Sous-commande optionnelle (ex. doctor).
     #[command(subcommand)]
@@ -52,6 +53,10 @@ pub struct CliArgs {
     /// Largeur personnalisée en colonnes (surcharge la détection automatique du terminal).
     #[arg(short = 'w', long = "width", value_name = "COLS")]
     pub width: Option<u16>,
+
+    /// Désactiver l'auto-orientation automatique (LR/RL -> TD) sur les terminaux étroits.
+    #[arg(long = "no-auto-orient")]
+    pub no_auto_orient: bool,
 }
 
 /// Sous-commandes disponibles pour `strmaid`.
@@ -159,6 +164,19 @@ mod tests {
         assert!(args_alias.is_ok());
         let parsed_alias = args_alias.unwrap_or_else(|_| unreachable!());
         assert_eq!(parsed_alias.graphics, Some(GraphicsProtocol::AsciiBox));
+    }
+
+    #[test]
+    fn test_cli_parse_no_auto_orient() {
+        let default_args = CliArgs::try_parse_from(["strmaid"]);
+        assert!(default_args.is_ok());
+        let parsed_default = default_args.unwrap_or_else(|_| unreachable!());
+        assert!(!parsed_default.no_auto_orient);
+
+        let explicit_args = CliArgs::try_parse_from(["strmaid", "--no-auto-orient"]);
+        assert!(explicit_args.is_ok());
+        let parsed_explicit = explicit_args.unwrap_or_else(|_| unreachable!());
+        assert!(parsed_explicit.no_auto_orient);
     }
 
     #[test]

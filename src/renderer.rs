@@ -7,6 +7,8 @@ use crate::mermaid;
 use crate::protocol::{asciibox, halfblock, iterm2, kitty};
 use crate::rasterizer;
 
+use std::borrow::Cow;
+
 /// Options de configuration pour le rendu d'un bloc de diagramme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderOptions {
@@ -15,6 +17,7 @@ pub struct RenderOptions {
     pub viewport: ViewportGeometry,
     pub limits: ResourceLimits,
     pub format: OutputFormat,
+    pub auto_orient: bool,
 }
 
 impl Default for RenderOptions {
@@ -36,6 +39,7 @@ impl RenderOptions {
             viewport,
             limits: ResourceLimits::default(),
             format: OutputFormat::Human,
+            auto_orient: true,
         }
     }
 
@@ -52,6 +56,7 @@ impl RenderOptions {
             viewport,
             limits,
             format: OutputFormat::Human,
+            auto_orient: true,
         }
     }
 
@@ -69,12 +74,19 @@ impl RenderOptions {
             viewport,
             limits,
             format,
+            auto_orient: true,
         }
     }
 
     #[must_use]
     pub const fn with_format(mut self, format: OutputFormat) -> Self {
         self.format = format;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_auto_orient(mut self, auto_orient: bool) -> Self {
+        self.auto_orient = auto_orient;
         self
     }
 }
@@ -93,6 +105,26 @@ fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> 
         viewport,
         limits: options.limits,
         format: options.format,
+        auto_orient: options.auto_orient,
+    }
+}
+
+fn prepare_diagram_for_rendering(
+    diagram: &DiagramBlock,
+    options: RenderOptions,
+) -> Cow<'_, DiagramBlock> {
+    if !options.auto_orient {
+        return Cow::Borrowed(diagram);
+    }
+
+    let target_cols = options.viewport.columns.max(10);
+    let adapted = mermaid::adapt_direction_for_viewport(diagram.as_str(), target_cols);
+    match adapted {
+        Cow::Owned(new_content) => {
+            let block = DiagramBlock::with_metadata(new_content, diagram.metadata().clone());
+            Cow::Owned(block)
+        }
+        Cow::Borrowed(_) => Cow::Borrowed(diagram),
     }
 }
 
@@ -103,24 +135,33 @@ pub fn analyze_and_render_diagram(
     options: RenderOptions,
     index: usize,
 ) -> JsonStreamItem {
+    let raw_source = diagram.as_str().to_string();
     let effective_options = resolve_effective_options(diagram, options);
-    if effective_options.protocol == GraphicsProtocol::AsciiBox {
-        return render_asciibox_to_json_item(diagram, effective_options, index);
-    }
+    let effective_diagram = prepare_diagram_for_rendering(diagram, effective_options);
+    let render_target = effective_diagram.as_ref();
 
-    match mermaid::render_to_svg_detailed(diagram, effective_options.theme) {
-        Ok(svg) => render_svg_to_json_item(&svg, diagram, effective_options, index),
-        Err(err_detail) => JsonStreamItem::Diagram {
-            index,
-            valid: false,
-            title: diagram.title().map(ToString::to_string),
-            dimensions: None,
-            protocol: None,
-            payload: None,
-            error: Some(err_detail),
-            raw_content: diagram.as_str().to_string(),
-        },
+    let mut item = if effective_options.protocol == GraphicsProtocol::AsciiBox {
+        render_asciibox_to_json_item(render_target, effective_options, index)
+    } else {
+        match mermaid::render_to_svg_detailed(render_target, effective_options.theme) {
+            Ok(svg) => render_svg_to_json_item(&svg, render_target, effective_options, index),
+            Err(err_detail) => JsonStreamItem::Diagram {
+                index,
+                valid: false,
+                title: diagram.title().map(ToString::to_string),
+                dimensions: None,
+                protocol: None,
+                payload: None,
+                error: Some(err_detail),
+                raw_content: raw_source.clone(),
+            },
+        }
+    };
+
+    if let JsonStreamItem::Diagram { raw_content, .. } = &mut item {
+        *raw_content = raw_source;
     }
+    item
 }
 
 fn render_asciibox_to_json_item(
@@ -213,6 +254,9 @@ fn render_svg_to_json_item(
 #[must_use]
 pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) -> (String, bool) {
     let effective_options = resolve_effective_options(diagram, options);
+    let effective_diagram = prepare_diagram_for_rendering(diagram, effective_options);
+    let diagram = effective_diagram.as_ref();
+
     let cache_key = RenderCacheKey::new(
         diagram.as_str(),
         effective_options.theme,
@@ -568,5 +612,44 @@ mod tests {
         let (output2, valid2) = render_diagram_checked(&block, options);
         assert!(valid2);
         assert_eq!(output1, output2);
+    }
+
+    #[test]
+    fn test_render_diagram_auto_orients_narrow_viewport() {
+        let block = DiagramBlock::new("graph LR\n  Alpha --> Beta".to_string());
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(60, 24),
+        );
+        let (output, valid) = render_diagram_checked(&block, options);
+        assert!(valid);
+        assert!(output.contains("Alpha"));
+        assert!(output.contains("Beta"));
+        let alpha_line = output
+            .lines()
+            .position(|l| l.contains("Alpha"))
+            .unwrap_or(0);
+        let beta_line = output.lines().position(|l| l.contains("Beta")).unwrap_or(0);
+        assert!(alpha_line < beta_line);
+    }
+
+    #[test]
+    fn test_render_diagram_respects_no_auto_orient() {
+        let block = DiagramBlock::new("graph LR\n  Alpha --> Beta".to_string());
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(60, 24),
+        )
+        .with_auto_orient(false);
+        let (output, valid) = render_diagram_checked(&block, options);
+        assert!(valid);
+        assert!(output.contains("Alpha"));
+        assert!(output.contains("Beta"));
+        let line_with_both = output
+            .lines()
+            .any(|l| l.contains("Alpha") && l.contains("Beta"));
+        assert!(line_with_both);
     }
 }

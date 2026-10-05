@@ -114,6 +114,7 @@ fn build_render_options(args: &CliArgs) -> RenderOptions {
         ResourceLimits::default(),
         args.format,
     )
+    .with_auto_orient(!args.no_auto_orient)
 }
 
 fn execute_with_reader<R: BufRead + Send + 'static>(
