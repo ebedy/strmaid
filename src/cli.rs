@@ -66,6 +66,10 @@ pub struct CliArgs {
         default_value_t = DiagramEngineType::MermaidSvg
     )]
     pub engine: DiagramEngineType,
+
+    /// Délai maximal d'exécution d'un rendu de diagramme en millisecondes (0 pour désactiver).
+    #[arg(long = "timeout-ms", value_name = "MS", default_value_t = 5000)]
+    pub timeout_ms: u64,
 }
 
 /// Sous-commandes disponibles pour `strmaid`.
@@ -352,5 +356,18 @@ mod tests {
     fn test_cli_rejects_invalid_engine() {
         let args = CliArgs::try_parse_from(["strmaid", "--engine", "invalid-engine"]);
         assert!(args.is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_timeout_ms() {
+        let args_default = CliArgs::try_parse_from(["strmaid"]);
+        assert!(args_default.is_ok());
+        let parsed_default = args_default.unwrap_or_else(|_| unreachable!());
+        assert_eq!(parsed_default.timeout_ms, 5000);
+
+        let args_custom = CliArgs::try_parse_from(["strmaid", "--timeout-ms", "1500"]);
+        assert!(args_custom.is_ok());
+        let parsed_custom = args_custom.unwrap_or_else(|_| unreachable!());
+        assert_eq!(parsed_custom.timeout_ms, 1500);
     }
 }

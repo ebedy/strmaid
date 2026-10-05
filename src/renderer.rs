@@ -150,28 +150,55 @@ pub fn analyze_and_render_diagram(
     let raw_source = diagram.as_str().to_string();
     let effective_options = resolve_effective_options(diagram, options);
     let effective_diagram = prepare_diagram_for_rendering(diagram, effective_options);
-    let render_target = effective_diagram.as_ref();
+    let render_target = effective_diagram.into_owned();
+    let timeout = effective_options.limits.render_timeout;
 
-    let mut item = if effective_options.protocol == GraphicsProtocol::AsciiBox {
-        render_asciibox_to_json_item(render_target, effective_options, index)
-    } else {
-        match mermaid::render_to_svg_detailed_with_engine(
-            render_target,
-            effective_options.theme,
-            effective_options.engine,
-        ) {
-            Ok(svg) => render_svg_to_json_item(&svg, render_target, effective_options, index),
-            Err(err_detail) => JsonStreamItem::Diagram {
-                index,
-                valid: false,
-                title: diagram.title().map(ToString::to_string),
-                dimensions: None,
-                protocol: None,
-                payload: None,
-                error: Some(err_detail),
-                raw_content: raw_source.clone(),
-            },
-        }
+    let res = run_with_render_timeout(
+        move || {
+            let item = if effective_options.protocol == GraphicsProtocol::AsciiBox {
+                render_asciibox_to_json_item(&render_target, effective_options, index)
+            } else {
+                match mermaid::render_to_svg_detailed_with_engine(
+                    &render_target,
+                    effective_options.theme,
+                    effective_options.engine,
+                ) {
+                    Ok(svg) => {
+                        render_svg_to_json_item(&svg, &render_target, effective_options, index)
+                    }
+                    Err(err_detail) => JsonStreamItem::Diagram {
+                        index,
+                        valid: false,
+                        title: render_target.title().map(ToString::to_string),
+                        dimensions: None,
+                        protocol: None,
+                        payload: None,
+                        error: Some(err_detail),
+                        raw_content: render_target.as_str().to_string(),
+                    },
+                }
+            };
+            Ok(item)
+        },
+        timeout,
+    );
+
+    let mut item = match res {
+        Ok(item) => item,
+        Err(err) => JsonStreamItem::Diagram {
+            index,
+            valid: false,
+            title: diagram.title().map(ToString::to_string),
+            dimensions: None,
+            protocol: None,
+            payload: None,
+            error: Some(DiagramErrorDetail::new(
+                format!("{err}"),
+                None,
+                Some("RenderTimeout".to_string()),
+            )),
+            raw_content: raw_source.clone(),
+        },
     };
 
     if let JsonStreamItem::Diagram { raw_content, .. } = &mut item {
@@ -266,6 +293,33 @@ fn render_svg_to_json_item(
     }
 }
 
+fn run_with_render_timeout<F, T>(f: F, timeout: Option<std::time::Duration>) -> Result<T, CliError>
+where
+    F: FnOnce() -> Result<T, CliError> + Send + 'static,
+    T: Send + 'static,
+{
+    let Some(timeout_dur) = timeout else {
+        return f();
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = f();
+        let _ = tx.send(res);
+    });
+
+    match rx.recv_timeout(timeout_dur) {
+        Ok(res) => res,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CliError::ResourceLimit(format!(
+            "délai de rendu Mermaid dépassé ({} ms)",
+            timeout_dur.as_millis()
+        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CliError::ResourceLimit(
+            "interruption anormale du thread de rendu Mermaid".to_string(),
+        )),
+    }
+}
+
 /// Rendu d'un bloc Mermaid avec rapport de validité (succès vs fallback d'erreur).
 #[must_use]
 pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) -> (String, bool) {
@@ -288,27 +342,38 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
         return (format!("{title_prefix}{cached_payload}"), is_valid);
     }
 
-    if effective_options.protocol == GraphicsProtocol::AsciiBox {
-        let (output, is_valid, raw_payload) =
-            render_asciibox_to_terminal(diagram, effective_options);
-        if is_valid {
-            RenderCache::global().insert(cache_key, (raw_payload, true));
-        }
-        return (output, is_valid);
-    }
+    let diag_for_render = diagram.clone();
+    let timeout = effective_options.limits.render_timeout;
 
-    match mermaid::render_to_svg_with_engine(
-        diagram,
-        effective_options.theme,
-        effective_options.engine,
-    ) {
-        Ok(svg) => {
-            let (rendered, is_valid, raw_encoded) =
-                render_svg_to_terminal_with_raw(&svg, diagram, effective_options);
-            if is_valid {
-                RenderCache::global().insert(cache_key, (raw_encoded, true));
+    let render_result = run_with_render_timeout(
+        move || {
+            if effective_options.protocol == GraphicsProtocol::AsciiBox {
+                Ok(render_asciibox_to_terminal(
+                    &diag_for_render,
+                    effective_options,
+                ))
+            } else {
+                let svg = mermaid::render_to_svg_with_engine(
+                    &diag_for_render,
+                    effective_options.theme,
+                    effective_options.engine,
+                )?;
+                Ok(render_svg_to_terminal_with_raw(
+                    &svg,
+                    &diag_for_render,
+                    effective_options,
+                ))
             }
-            (rendered, is_valid)
+        },
+        timeout,
+    );
+
+    match render_result {
+        Ok((output, is_valid, raw_payload)) => {
+            if is_valid {
+                RenderCache::global().insert(cache_key, (raw_payload, true));
+            }
+            (output, is_valid)
         }
         Err(err) => (format_fallback(diagram, &err), false),
     }
@@ -693,5 +758,45 @@ mod tests {
             "Rendering with merman should succeed for sequence diagram"
         );
         assert_ne!(output, "");
+    }
+
+    #[test]
+    fn test_render_diagram_timeout_triggers_fallback() {
+        let block = DiagramBlock::new("graph TD\n  A --> B --> C".to_string());
+        let limits =
+            ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
+        let options = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            limits,
+        );
+
+        let (output, valid) = render_diagram_checked(&block, options);
+        assert!(!valid, "Must trigger fallback on timeout");
+        assert!(output.contains("délai de rendu Mermaid dépassé"));
+    }
+
+    #[test]
+    fn test_analyze_and_render_diagram_timeout_reports_error() {
+        let block = DiagramBlock::new("graph TD\n  A --> B".to_string());
+        let limits =
+            ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
+        let options = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            limits,
+        );
+
+        let item = analyze_and_render_diagram(&block, options, 0);
+        match item {
+            JsonStreamItem::Diagram { valid, error, .. } => {
+                assert!(!valid);
+                let err = error.unwrap_or_else(|| unreachable!());
+                assert_eq!(err.kind, Some("RenderTimeout".to_string()));
+            }
+            JsonStreamItem::Text { .. } => unreachable!(),
+        }
     }
 }

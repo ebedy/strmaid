@@ -1,5 +1,6 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
 /// Thème visuel pour le rendu SVG Mermaid.
@@ -223,6 +224,7 @@ pub struct ResourceLimits {
     pub max_raster_pixels: u32,
     pub max_pager_lines: usize,
     pub max_cached_diagrams: usize,
+    pub render_timeout: Option<Duration>,
 }
 
 impl Default for ResourceLimits {
@@ -232,7 +234,16 @@ impl Default for ResourceLimits {
             max_raster_pixels: 8_000_000,
             max_pager_lines: 20_000,
             max_cached_diagrams: 32,
+            render_timeout: Some(Duration::from_millis(5000)),
         }
+    }
+}
+
+impl ResourceLimits {
+    #[must_use]
+    pub const fn with_render_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.render_timeout = timeout;
+        self
     }
 }
 

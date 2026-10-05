@@ -107,15 +107,16 @@ fn build_render_options(args: &CliArgs) -> RenderOptions {
     let effective_cols = args.width.unwrap_or(cols);
     let viewport = ViewportGeometry::new(effective_cols, rows);
 
-    RenderOptions::with_all(
-        theme,
-        protocol,
-        viewport,
-        ResourceLimits::default(),
-        args.format,
-    )
-    .with_auto_orient(!args.no_auto_orient)
-    .with_engine(args.engine)
+    let limits = if args.timeout_ms == 0 {
+        ResourceLimits::default().with_render_timeout(None)
+    } else {
+        ResourceLimits::default()
+            .with_render_timeout(Some(std::time::Duration::from_millis(args.timeout_ms)))
+    };
+
+    RenderOptions::with_all(theme, protocol, viewport, limits, args.format)
+        .with_auto_orient(!args.no_auto_orient)
+        .with_engine(args.engine)
 }
 
 fn execute_with_reader<R: BufRead + Send + 'static>(
