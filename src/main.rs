@@ -115,6 +115,7 @@ fn build_render_options(args: &CliArgs) -> RenderOptions {
         args.format,
     )
     .with_auto_orient(!args.no_auto_orient)
+    .with_engine(args.engine)
 }
 
 fn execute_with_reader<R: BufRead + Send + 'static>(

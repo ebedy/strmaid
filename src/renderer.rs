@@ -1,7 +1,8 @@
 use crate::cache::{RenderCache, RenderCacheKey};
 use crate::domain::{
-    CliError, DiagramBlock, DiagramDimensions, DiagramErrorDetail, GraphicsProtocol,
-    JsonStreamItem, OutputFormat, RasterizedImage, ResourceLimits, ThemeMode, ViewportGeometry,
+    CliError, DiagramBlock, DiagramDimensions, DiagramEngineType, DiagramErrorDetail,
+    GraphicsProtocol, JsonStreamItem, OutputFormat, RasterizedImage, ResourceLimits, ThemeMode,
+    ViewportGeometry,
 };
 use crate::mermaid;
 use crate::protocol::{asciibox, halfblock, iterm2, kitty};
@@ -18,6 +19,7 @@ pub struct RenderOptions {
     pub limits: ResourceLimits,
     pub format: OutputFormat,
     pub auto_orient: bool,
+    pub engine: DiagramEngineType,
 }
 
 impl Default for RenderOptions {
@@ -40,6 +42,7 @@ impl RenderOptions {
             limits: ResourceLimits::default(),
             format: OutputFormat::Human,
             auto_orient: true,
+            engine: DiagramEngineType::default(),
         }
     }
 
@@ -57,6 +60,7 @@ impl RenderOptions {
             limits,
             format: OutputFormat::Human,
             auto_orient: true,
+            engine: DiagramEngineType::MermaidSvg,
         }
     }
 
@@ -75,6 +79,7 @@ impl RenderOptions {
             limits,
             format,
             auto_orient: true,
+            engine: DiagramEngineType::MermaidSvg,
         }
     }
 
@@ -87,6 +92,12 @@ impl RenderOptions {
     #[must_use]
     pub const fn with_auto_orient(mut self, auto_orient: bool) -> Self {
         self.auto_orient = auto_orient;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_engine(mut self, engine: DiagramEngineType) -> Self {
+        self.engine = engine;
         self
     }
 }
@@ -106,6 +117,7 @@ fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> 
         limits: options.limits,
         format: options.format,
         auto_orient: options.auto_orient,
+        engine: options.engine,
     }
 }
 
@@ -143,7 +155,11 @@ pub fn analyze_and_render_diagram(
     let mut item = if effective_options.protocol == GraphicsProtocol::AsciiBox {
         render_asciibox_to_json_item(render_target, effective_options, index)
     } else {
-        match mermaid::render_to_svg_detailed(render_target, effective_options.theme) {
+        match mermaid::render_to_svg_detailed_with_engine(
+            render_target,
+            effective_options.theme,
+            effective_options.engine,
+        ) {
             Ok(svg) => render_svg_to_json_item(&svg, render_target, effective_options, index),
             Err(err_detail) => JsonStreamItem::Diagram {
                 index,
@@ -262,6 +278,7 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
         effective_options.theme,
         effective_options.viewport.columns,
         effective_options.protocol,
+        effective_options.engine,
     );
 
     if let Some((cached_payload, is_valid)) = RenderCache::global().get(&cache_key) {
@@ -280,7 +297,11 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
         return (output, is_valid);
     }
 
-    match mermaid::render_to_svg(diagram, effective_options.theme) {
+    match mermaid::render_to_svg_with_engine(
+        diagram,
+        effective_options.theme,
+        effective_options.engine,
+    ) {
         Ok(svg) => {
             let (rendered, is_valid, raw_encoded) =
                 render_svg_to_terminal_with_raw(&svg, diagram, effective_options);
@@ -601,6 +622,7 @@ mod tests {
             options.theme,
             options.viewport.target_columns(),
             options.protocol,
+            options.engine,
         );
 
         // Premier appel : remplit le cache
@@ -651,5 +673,25 @@ mod tests {
             .lines()
             .any(|l| l.contains("Alpha") && l.contains("Beta"));
         assert!(line_with_both);
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_render_diagram_with_merman_engine() {
+        let block = DiagramBlock::new(
+            "sequenceDiagram\n  autonumber\n  Alice->>Bob: Ping\n  Bob-->>Alice: Pong".to_string(),
+        );
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+        )
+        .with_engine(DiagramEngineType::Merman);
+        let (output, valid) = render_diagram_checked(&block, options);
+        assert!(
+            valid,
+            "Rendering with merman should succeed for sequence diagram"
+        );
+        assert_ne!(output, "");
     }
 }

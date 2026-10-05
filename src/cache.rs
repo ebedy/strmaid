@@ -1,4 +1,4 @@
-use crate::domain::{GraphicsProtocol, ThemeMode};
+use crate::domain::{DiagramEngineType, GraphicsProtocol, ThemeMode};
 use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 
@@ -9,16 +9,24 @@ pub struct RenderCacheKey {
     pub theme: ThemeMode,
     pub width: u16,
     pub protocol: GraphicsProtocol,
+    pub engine: DiagramEngineType,
 }
 
 impl RenderCacheKey {
     #[must_use]
-    pub fn new(content: &str, theme: ThemeMode, width: u16, protocol: GraphicsProtocol) -> Self {
+    pub fn new(
+        content: &str,
+        theme: ThemeMode,
+        width: u16,
+        protocol: GraphicsProtocol,
+        engine: DiagramEngineType,
+    ) -> Self {
         Self {
             content: content.to_string(),
             theme,
             width,
             protocol,
+            engine,
         }
     }
 }
@@ -113,12 +121,14 @@ mod tests {
             ThemeMode::Dark,
             80,
             GraphicsProtocol::HalfBlocks,
+            DiagramEngineType::default(),
         );
         let key2 = RenderCacheKey::new(
             "graph LR\nA-->B",
             ThemeMode::Light,
             80,
             GraphicsProtocol::Kitty,
+            DiagramEngineType::default(),
         );
 
         cache.insert(key1.clone(), ("render1".to_string(), true));
@@ -132,9 +142,27 @@ mod tests {
     #[test]
     fn test_cache_lru_eviction() {
         let cache = RenderCache::new(2);
-        let key1 = RenderCacheKey::new("k1", ThemeMode::Dark, 80, GraphicsProtocol::HalfBlocks);
-        let key2 = RenderCacheKey::new("k2", ThemeMode::Dark, 80, GraphicsProtocol::HalfBlocks);
-        let key3 = RenderCacheKey::new("k3", ThemeMode::Dark, 80, GraphicsProtocol::HalfBlocks);
+        let key1 = RenderCacheKey::new(
+            "k1",
+            ThemeMode::Dark,
+            80,
+            GraphicsProtocol::HalfBlocks,
+            DiagramEngineType::default(),
+        );
+        let key2 = RenderCacheKey::new(
+            "k2",
+            ThemeMode::Dark,
+            80,
+            GraphicsProtocol::HalfBlocks,
+            DiagramEngineType::default(),
+        );
+        let key3 = RenderCacheKey::new(
+            "k3",
+            ThemeMode::Dark,
+            80,
+            GraphicsProtocol::HalfBlocks,
+            DiagramEngineType::default(),
+        );
 
         cache.insert(key1.clone(), ("r1".to_string(), true));
         cache.insert(key2.clone(), ("r2".to_string(), true));
@@ -153,7 +181,13 @@ mod tests {
     #[test]
     fn test_cache_zero_capacity() {
         let cache = RenderCache::new(0);
-        let key = RenderCacheKey::new("k", ThemeMode::Dark, 80, GraphicsProtocol::HalfBlocks);
+        let key = RenderCacheKey::new(
+            "k",
+            ThemeMode::Dark,
+            80,
+            GraphicsProtocol::HalfBlocks,
+            DiagramEngineType::default(),
+        );
         cache.insert(key.clone(), ("r".to_string(), true));
         assert!(cache.is_empty());
         assert_eq!(cache.get(&key), None);

@@ -1,4 +1,4 @@
-use crate::domain::{CliError, DiagramBlock, DiagramErrorDetail, ThemeMode};
+use crate::domain::{CliError, DiagramBlock, DiagramEngineType, DiagramErrorDetail, ThemeMode};
 use mermaid_svg::Theme;
 use std::borrow::Cow;
 
@@ -180,9 +180,82 @@ impl DiagramEngine for MermaidSvgEngine {
 
 static DEFAULT_ENGINE: MermaidSvgEngine = MermaidSvgEngine;
 
+#[cfg(feature = "merman")]
+static MERMAN_ENGINE: MermanEngine = MermanEngine;
+
 #[must_use]
 pub fn default_engine() -> &'static dyn DiagramEngine {
     &DEFAULT_ENGINE
+}
+
+/// Sélectionne un moteur de rendu par son nom.
+///
+/// # Errors
+/// Renvoie `CliError::InvalidArgument` si le moteur demandé est inconnu ou non compilé.
+pub fn engine_by_name(name: &str) -> Result<&'static dyn DiagramEngine, CliError> {
+    match name {
+        "mermaid-svg" => Ok(&DEFAULT_ENGINE),
+        #[cfg(feature = "merman")]
+        "merman" => Ok(&MERMAN_ENGINE),
+        #[cfg(not(feature = "merman"))]
+        "merman" => Err(CliError::CommandLine(
+            "Le moteur 'merman' n'est pas activé dans ce binaire (recompilez avec --features merman)".to_string(),
+        )),
+        other => Err(CliError::CommandLine(format!(
+            "Moteur Mermaid inconnu '{other}'. Moteurs disponibles: 'mermaid-svg'{}",
+            if cfg!(feature = "merman") { ", 'merman'" } else { "" }
+        ))),
+    }
+}
+
+/// Sélectionne un moteur de rendu par son type d'énumération.
+///
+/// # Errors
+/// Renvoie `CliError::CommandLine` si le moteur demandé n'est pas activé à la compilation.
+pub fn get_engine(engine_type: DiagramEngineType) -> Result<&'static dyn DiagramEngine, CliError> {
+    engine_by_name(engine_type.as_str())
+}
+
+#[cfg(feature = "merman")]
+/// Moteur de rendu SVG basé sur `merman` (standard Zed / layout ELK).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MermanEngine;
+
+#[cfg(feature = "merman")]
+impl DiagramEngine for MermanEngine {
+    fn name(&self) -> &'static str {
+        "merman"
+    }
+
+    fn render_svg(
+        &self,
+        diagram: &DiagramBlock,
+        _theme: ThemeMode,
+    ) -> Result<String, DiagramErrorDetail> {
+        let output = merman::Renderer::new()
+            .render(merman::RenderRequest::svg(
+                diagram.as_str(),
+                merman::OperationControl::new(),
+                merman::SvgRequest::default(),
+            ))
+            .map_err(|err| {
+                DiagramErrorDetail::new(format!("{err}"), None, Some("MermanError".to_string()))
+            })?;
+
+        match output {
+            merman::RenderOutput::Svg(Some(svg_artifact)) => Ok(svg_artifact.svg().to_string()),
+            merman::RenderOutput::Svg(None) => Err(DiagramErrorDetail::new(
+                "Merman n'a produit aucun flux SVG".to_string(),
+                None,
+                Some("EmptyOutput".to_string()),
+            )),
+            _ => Err(DiagramErrorDetail::new(
+                "Merman a produit un format de sortie inattendu".to_string(),
+                None,
+                Some("UnexpectedOutput".to_string()),
+            )),
+        }
+    }
 }
 
 /// Seuil de largeur (en colonnes) en dessous duquel un étalement horizontal (LR/RL)
@@ -290,12 +363,39 @@ pub fn render_to_svg_detailed(
     default_engine().render_svg(diagram, theme_mode)
 }
 
+/// Compile un bloc de diagramme Mermaid avec un moteur spécifique et diagnostic détaillé.
+///
+/// # Errors
+/// Renvoie `DiagramErrorDetail` si le moteur est indisponible ou la syntaxe invalide.
+pub fn render_to_svg_detailed_with_engine(
+    diagram: &DiagramBlock,
+    theme_mode: ThemeMode,
+    engine_type: DiagramEngineType,
+) -> Result<String, DiagramErrorDetail> {
+    let engine = get_engine(engine_type).map_err(|err| {
+        DiagramErrorDetail::new(format!("{err}"), None, Some("EngineError".to_string()))
+    })?;
+    engine.render_svg(diagram, theme_mode)
+}
+
 /// Compile un bloc de diagramme Mermaid en document SVG vectoriel.
 ///
 /// # Errors
 /// Renvoie `CliError::MermaidSyntax` si la syntaxe Mermaid est invalide.
 pub fn render_to_svg(diagram: &DiagramBlock, theme_mode: ThemeMode) -> Result<String, CliError> {
-    render_to_svg_detailed(diagram, theme_mode).map_err(|detail| {
+    render_to_svg_with_engine(diagram, theme_mode, DiagramEngineType::default())
+}
+
+/// Compile un bloc de diagramme Mermaid avec un moteur spécifique.
+///
+/// # Errors
+/// Renvoie `CliError::MermaidSyntax` ou `CliError::CommandLine`.
+pub fn render_to_svg_with_engine(
+    diagram: &DiagramBlock,
+    theme_mode: ThemeMode,
+    engine_type: DiagramEngineType,
+) -> Result<String, CliError> {
+    render_to_svg_detailed_with_engine(diagram, theme_mode, engine_type).map_err(|detail| {
         if let Some(line) = detail.line {
             CliError::MermaidSyntax(format!("ligne {line}: {}", detail.message))
         } else {
@@ -403,5 +503,80 @@ mod tests {
         let input = "graph LR\n  A[\"Cache LRU Engine\"] --> B";
         let adapted = adapt_direction_for_viewport(input, 80);
         assert_eq!(adapted, "graph TD\n  A[\"Cache LRU Engine\"] --> B");
+    }
+
+    #[test]
+    fn test_engine_by_name_default() {
+        let engine = engine_by_name("mermaid-svg");
+        assert!(engine.is_ok());
+        if let Ok(eng) = engine {
+            assert_eq!(eng.name(), "mermaid-svg");
+        }
+    }
+
+    #[test]
+    fn test_engine_by_name_unknown() {
+        let result = engine_by_name("unknown-engine");
+        assert!(result.is_err());
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_engine_by_name_merman() {
+        let engine = engine_by_name("merman");
+        assert!(engine.is_ok());
+        if let Ok(eng) = engine {
+            assert_eq!(eng.name(), "merman");
+        }
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_render_flowchart() {
+        let block = DiagramBlock::new("flowchart TD\n  A[Start] --> B[Done]".to_string());
+        let engine = MermanEngine;
+        let result = engine.render_svg(&block, ThemeMode::Dark);
+        assert!(
+            result.is_ok(),
+            "Merman should render flowchart: {:?}",
+            result.err()
+        );
+        let svg = result.unwrap_or_default();
+        assert!(svg.contains("<svg"), "Output should contain SVG root tag");
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_render_sequence_diagram() {
+        let block = DiagramBlock::new(
+            "sequenceDiagram\n  autonumber\n  Alice->>Bob: Hello\n  Bob-->>Alice: Hi".to_string(),
+        );
+        let engine = MermanEngine;
+        let result = engine.render_svg(&block, ThemeMode::Dark);
+        assert!(
+            result.is_ok(),
+            "Merman should render sequence diagram: {:?}",
+            result.err()
+        );
+        let svg = result.unwrap_or_default();
+        assert!(svg.contains("<svg"), "Output should contain SVG root tag");
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_render_state_diagram() {
+        let block = DiagramBlock::new(
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Processing\n  Processing --> [*]"
+                .to_string(),
+        );
+        let engine = MermanEngine;
+        let result = engine.render_svg(&block, ThemeMode::Dark);
+        assert!(
+            result.is_ok(),
+            "Merman should render state diagram: {:?}",
+            result.err()
+        );
+        let svg = result.unwrap_or_default();
+        assert!(svg.contains("<svg"), "Output should contain SVG root tag");
     }
 }

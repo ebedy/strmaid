@@ -1,4 +1,4 @@
-use crate::domain::{CliError, GraphicsProtocol, OutputFormat, ThemeMode};
+use crate::domain::{CliError, DiagramEngineType, GraphicsProtocol, OutputFormat, ThemeMode};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -57,6 +57,15 @@ pub struct CliArgs {
     /// Désactiver l'auto-orientation automatique (LR/RL -> TD) sur les terminaux étroits.
     #[arg(long = "no-auto-orient")]
     pub no_auto_orient: bool,
+
+    /// Moteur Mermaid pour la génération vectorielle (mermaid-svg, merman).
+    #[arg(
+        long = "engine",
+        value_name = "ENGINE",
+        value_enum,
+        default_value_t = DiagramEngineType::MermaidSvg
+    )]
+    pub engine: DiagramEngineType,
 }
 
 /// Sous-commandes disponibles pour `strmaid`.
@@ -324,5 +333,24 @@ mod tests {
             })
         );
         assert!(parsed.validate().is_ok());
+    }
+
+    #[test]
+    fn test_cli_parse_engine_options() {
+        let args_default = CliArgs::try_parse_from(["strmaid"]);
+        assert!(args_default.is_ok());
+        let parsed_default = args_default.unwrap_or_else(|_| unreachable!());
+        assert_eq!(parsed_default.engine, DiagramEngineType::MermaidSvg);
+
+        let args_merman = CliArgs::try_parse_from(["strmaid", "--engine", "merman"]);
+        assert!(args_merman.is_ok());
+        let parsed_merman = args_merman.unwrap_or_else(|_| unreachable!());
+        assert_eq!(parsed_merman.engine, DiagramEngineType::Merman);
+    }
+
+    #[test]
+    fn test_cli_rejects_invalid_engine() {
+        let args = CliArgs::try_parse_from(["strmaid", "--engine", "invalid-engine"]);
+        assert!(args.is_err());
     }
 }

@@ -91,6 +91,32 @@ pub enum OutputFormat {
     Ndjson,
 }
 
+/// Moteur de génération vectorielle SVG pour diagrammes Mermaid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, ValueEnum, Serialize, Deserialize)]
+#[value(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")]
+pub enum DiagramEngineType {
+    #[default]
+    MermaidSvg,
+    Merman,
+}
+
+impl DiagramEngineType {
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::MermaidSvg => "mermaid-svg",
+            Self::Merman => "merman",
+        }
+    }
+}
+
+impl std::fmt::Display for DiagramEngineType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// Dimensions matricielles d'un diagramme rendu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagramDimensions {
