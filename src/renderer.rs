@@ -136,18 +136,26 @@ fn prepare_diagram_for_rendering(
     diagram: &DiagramBlock,
     options: RenderOptions,
 ) -> Cow<'_, DiagramBlock> {
-    if !options.auto_orient {
-        return Cow::Borrowed(diagram);
-    }
-
+    let sanitized = mermaid::sanitize_mermaid_labels(diagram.as_str());
     let target_cols = options.viewport.columns.max(10);
-    let adapted = mermaid::adapt_direction_for_viewport(diagram.as_str(), target_cols);
-    match adapted {
-        Cow::Owned(new_content) => {
-            let block = DiagramBlock::with_metadata(new_content, diagram.metadata().clone());
-            Cow::Owned(block)
-        }
-        Cow::Borrowed(_) => Cow::Borrowed(diagram),
+    let adapted = if options.auto_orient {
+        mermaid::adapt_direction_for_viewport(&sanitized, target_cols)
+    } else {
+        Cow::Borrowed(sanitized.as_ref())
+    };
+
+    if let Cow::Owned(content) = adapted {
+        Cow::Owned(DiagramBlock::with_metadata(
+            content,
+            diagram.metadata().clone(),
+        ))
+    } else if let Cow::Owned(content) = sanitized {
+        Cow::Owned(DiagramBlock::with_metadata(
+            content,
+            diagram.metadata().clone(),
+        ))
+    } else {
+        Cow::Borrowed(diagram)
     }
 }
 

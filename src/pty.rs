@@ -170,7 +170,7 @@ impl<W: Write> PtyStreamProcessor<W> {
             self.state = InterceptorState::Passthrough;
             Ok(())
         } else {
-            buffer.push(line.to_string());
+            buffer.push(strip_ansi(line));
             self.state = InterceptorState::Capturing {
                 buffer,
                 opening_fence,

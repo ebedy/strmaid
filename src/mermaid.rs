@@ -258,6 +258,142 @@ impl DiagramEngine for MermanEngine {
     }
 }
 
+/// Caractère Unicode de substitution sécurisé pour l'esperluette en libellé (U+FE60: Small Ampersand).
+/// Rendu visuellement identique à `&` tout en neutralisant l'opérateur de chaînage multiple Mermaid.
+pub const SAFE_AMPERSAND: char = '﹠';
+
+#[derive(Debug, Default)]
+struct LabelSanitizer {
+    in_comment: bool,
+    quote: Option<char>,
+    bracket_depth: usize,
+    paren_depth: usize,
+    brace_depth: usize,
+    in_pipe: bool,
+    escape_next: bool,
+}
+
+impl LabelSanitizer {
+    const fn is_in_label(&self) -> bool {
+        self.quote.is_some()
+            || self.bracket_depth > 0
+            || self.paren_depth > 0
+            || self.brace_depth > 0
+            || self.in_pipe
+    }
+
+    fn process_comment(&mut self, ch: char) {
+        if ch == '\n' {
+            self.in_comment = false;
+        }
+    }
+
+    fn update_quotes(&mut self, ch: char) {
+        if self.escape_next {
+            self.escape_next = false;
+            return;
+        }
+        if ch == '\\' {
+            self.escape_next = true;
+            return;
+        }
+        if let Some(q) = self.quote {
+            if ch == q {
+                self.quote = None;
+            }
+        } else if ch == '"' || ch == '\'' {
+            self.quote = Some(ch);
+        }
+    }
+
+    fn update_delimiters(&mut self, ch: char) {
+        if self.quote.is_some() {
+            return;
+        }
+        match ch {
+            '[' => self.bracket_depth = self.bracket_depth.saturating_add(1),
+            ']' => self.bracket_depth = self.bracket_depth.saturating_sub(1),
+            '(' => self.paren_depth = self.paren_depth.saturating_add(1),
+            ')' => self.paren_depth = self.paren_depth.saturating_sub(1),
+            '{' => self.brace_depth = self.brace_depth.saturating_add(1),
+            '}' => self.brace_depth = self.brace_depth.saturating_sub(1),
+            '|' => self.in_pipe = !self.in_pipe,
+            _ => {}
+        }
+    }
+}
+
+fn check_ampersand_action(remainder: &str) -> Option<(char, usize)> {
+    if remainder.starts_with("&amp;") {
+        return Some((SAFE_AMPERSAND, 5));
+    }
+    if remainder.starts_with("&#38;") {
+        return Some((SAFE_AMPERSAND, 5));
+    }
+    if remainder.starts_with("&lt;")
+        || remainder.starts_with("&gt;")
+        || remainder.starts_with("&quot;")
+        || remainder.starts_with("&apos;")
+    {
+        return None;
+    }
+    Some((SAFE_AMPERSAND, 1))
+}
+
+/// Assainit les libellés de diagrammes Mermaid pour neutraliser les défaillances de parsing.
+///
+/// Remplace les esperluettes (`&`) situées à l'intérieur de chaînes délimitées par des guillemets
+/// ou des balises de nœuds par le caractère Unicode sécurisé `﹠` (U+FE60), préservant ainsi les liaisons
+/// multiples légitimes hors guillemets (ex. `A & B --> C & D`).
+#[must_use]
+pub fn sanitize_mermaid_labels(source: &str) -> Cow<'_, str> {
+    if !source.contains('&') {
+        return Cow::Borrowed(source);
+    }
+
+    let mut result = String::with_capacity(source.len());
+    let mut sanitizer = LabelSanitizer::default();
+    let mut cursor = 0;
+
+    while cursor < source.len() {
+        let remainder = &source[cursor..];
+        let Some(ch) = remainder.chars().next() else {
+            break;
+        };
+
+        if sanitizer.in_comment {
+            result.push(ch);
+            sanitizer.process_comment(ch);
+            cursor += ch.len_utf8();
+            continue;
+        }
+
+        if remainder.starts_with("%%") && !sanitizer.is_in_label() {
+            sanitizer.in_comment = true;
+            result.push_str("%%");
+            cursor += 2;
+            continue;
+        }
+
+        sanitizer.update_quotes(ch);
+        sanitizer.update_delimiters(ch);
+
+        if ch == '&'
+            && sanitizer.is_in_label()
+            && let Some((replacement, advance)) = check_ampersand_action(remainder)
+        {
+            result.push(replacement);
+            cursor += advance;
+            continue;
+        }
+
+        result.push(ch);
+        cursor += ch.len_utf8();
+    }
+
+    Cow::Owned(result)
+}
+
 /// Seuil de largeur (en colonnes) en dessous duquel un étalement horizontal (LR/RL)
 /// est automatiquement adapté en cascade verticale (TD).
 pub const AUTOFOLD_WIDTH_THRESHOLD: u16 = 120;
@@ -375,7 +511,12 @@ pub fn render_to_svg_detailed_with_engine(
     let engine = get_engine(engine_type).map_err(|err| {
         DiagramErrorDetail::new(format!("{err}"), None, Some("EngineError".to_string()))
     })?;
-    engine.render_svg(diagram, theme_mode)
+    let sanitized = sanitize_mermaid_labels(diagram.as_str());
+    let render_block = match sanitized {
+        Cow::Owned(s) => DiagramBlock::with_metadata(s, diagram.metadata().clone()),
+        Cow::Borrowed(_) => diagram.clone(),
+    };
+    engine.render_svg(&render_block, theme_mode)
 }
 
 /// Compile un bloc de diagramme Mermaid en document SVG vectoriel.
@@ -578,5 +719,74 @@ mod tests {
         );
         let svg = result.unwrap_or_default();
         assert!(svg.contains("<svg"), "Output should contain SVG root tag");
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_no_ampersand() {
+        let src = "flowchart TD\n  A --> B";
+        assert_eq!(sanitize_mermaid_labels(src), Cow::Borrowed(src));
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_preserves_chaining_operator() {
+        let src = "flowchart TD\n  A & B --> C & D";
+        let sanitized = sanitize_mermaid_labels(src);
+        assert_eq!(sanitized.as_ref(), "flowchart TD\n  A & B --> C & D");
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_replaces_in_quoted_node() {
+        let src = r#"flowchart TD
+  C --> D["Filtrage & Sanctuarisation<br/>(ADR-0001, ADR-0002)"]
+  D --> E["Consolidation & Livrable<br/>Rapport Markdown Complet"]"#;
+        let sanitized = sanitize_mermaid_labels(src);
+        assert!(sanitized.contains("Filtrage ﹠ Sanctuarisation"));
+        assert!(sanitized.contains("Consolidation ﹠ Livrable"));
+        assert!(!sanitized.contains("& "));
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_replaces_entities() {
+        let src = r#"flowchart TD
+  A["A &amp; B"] --> C["C &#38; D"]"#;
+        let sanitized = sanitize_mermaid_labels(src);
+        assert!(sanitized.contains("A ﹠ B"));
+        assert!(sanitized.contains("C ﹠ D"));
+        assert!(!sanitized.contains("&amp;"));
+        assert!(!sanitized.contains("&#38;"));
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_preserves_html_entities() {
+        let src = r#"flowchart TD
+  A["x &lt; y and y &gt; z"]"#;
+        let sanitized = sanitize_mermaid_labels(src);
+        assert!(sanitized.contains("x &lt; y and y &gt; z"));
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_edge_labels() {
+        let src = r#"flowchart TD
+  A -->|"Process & Validate"| B
+  B -->|Step 1 & Step 2| C"#;
+        let sanitized = sanitize_mermaid_labels(src);
+        assert!(sanitized.contains(r#"|"Process ﹠ Validate"|"#));
+        assert!(sanitized.contains("|Step 1 ﹠ Step 2|"));
+    }
+
+    #[test]
+    fn test_render_exact_bug_screenshot_diagram() {
+        let src = r#"flowchart TD
+  A["Initialisation Audit<br/>& Outillage Qualité"] --> B["Collecte Statique<br/>PHPStan, Biome, Tests"]
+  B --> C["Déclenchement 5 Piliers<br/>(Sec, Perf, Qual, QA, DBA)"]
+  C --> D["Filtrage & Sanctuarisation<br/>(ADR-0001, ADR-0002)"]
+  D --> E["Consolidation & Livrable<br/>Rapport Markdown Complet"]"#;
+        let block = DiagramBlock::new(src.to_string());
+        let svg = render_to_svg(&block, ThemeMode::Dark);
+        assert!(svg.is_ok(), "Le diagramme issu du bug doit compiler en SVG");
+        let svg_str = svg.unwrap_or_default();
+        assert!(svg_str.contains("Initialisation Audit"));
+        assert!(svg_str.contains("Filtrage"));
+        assert!(svg_str.contains("Consolidation"));
     }
 }

@@ -340,6 +340,9 @@ Lorsqu'un agent IA conçoit un diagramme Mermaid destiné à être restitué dan
    - L'encombrement horizontal global calculé du graphe ne doit jamais dépasser 80 colonnes pour éviter tout déclenchement de repli dégradé en bloc de code brut.
 4. **Sobriété et concision sémantique :**
    - Les nœuds ne doivent contenir que l'intitulé fonctionnel majeur et son composant technique. Les détails d'implémentation fins doivent figurer dans le texte Markdown environnant.
+5. **Immunité contre l'opérateur de chaînage multiple (`&`) :**
+   - En syntaxe Mermaid (`flowchart`), le caractère `&` entouré d'espaces est un opérateur structurel de parallélisme (`A & B --> C`). S'il est inséré au sein d'un libellé, certains parsers fragmentent le nœud en morceaux disjoints avec injection de délimiteurs de syntaxe (`D["`, `"]`).
+   - **Règle absolue :** Ne jamais utiliser l'esperluette brute `&` dans les libellés de diagrammes Mermaid. Préférer systématiquement la conjonction naturelle « et », le signe « + », ou s'appuyer sur la substitution automatique par le caractère Unicode sécurisé `﹠` (U+FE60) opérée par `strmaid`.
 
 ---
 
