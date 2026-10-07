@@ -111,7 +111,7 @@ strmaid [OPTIONS] [FILE]
 | :--- | :--- | :--- |
 | `[FILE]` | Chemin | Fichier Markdown à lire. Si omis, `strmaid` lit depuis l'entrée standard (`stdin`). |
 | `-b`, `--block-only` | *Aucun* | Mode visualiseur pour éditeur : rend un unique bloc Mermaid (avec ou sans balises Markdown), sans TUI. Code de sortie `0` (valide) ou `1` (erreur). |
-| `-w`, `--width` | Nombre | Surcharge la largeur du terminal en colonnes (déclenche la compaction progressive si < 80 cols). |
+| `-w`, `--width` | Nombre (10–1000) | Surcharge la largeur du terminal en colonnes (déclenche la compaction progressive si < 80 cols). |
 | `-p`, `--pager` | *Aucun* | Force le mode pager interactif plein écran (TUI Ratatui). |
 | `--no-pager` | *Aucun* | Désactive le pager et force le mode filtre Unix composable (`stdout`). |
 | `-g`, `--graphics` | `kitty` \| `halfblocks` \| `asciibox` \| `raw` | Force le protocole graphique. Auto-détecté par défaut selon l'environnement. |

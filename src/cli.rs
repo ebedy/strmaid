@@ -50,8 +50,13 @@ pub struct CliArgs {
     #[arg(short = 'b', long = "block-only")]
     pub block_only: bool,
 
-    /// Largeur personnalisée en colonnes (surcharge la détection automatique du terminal).
-    #[arg(short = 'w', long = "width", value_name = "COLS")]
+    /// Largeur personnalisée en colonnes, entre 10 et 1000 (surcharge la détection automatique du terminal).
+    #[arg(
+        short = 'w',
+        long = "width",
+        value_name = "COLS",
+        value_parser = clap::value_parser!(u16).range(10..=1000)
+    )]
     pub width: Option<u16>,
 
     /// Désactiver l'auto-orientation automatique (LR/RL -> TD) sur les terminaux étroits.
@@ -118,11 +123,6 @@ impl CliArgs {
             return Err(CliError::TerminalInit(
                 "l'option --block-only est incompatible avec le mode pager interactif (--pager)"
                     .to_string(),
-            ));
-        }
-        if self.width == Some(0) {
-            return Err(CliError::TerminalInit(
-                "la largeur --width doit être strictement supérieure à 0".to_string(),
             ));
         }
         Ok(())
@@ -273,11 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_validate_rejects_zero_width() {
-        let args = CliArgs::try_parse_from(["strmaid", "--width", "0"]);
-        assert!(args.is_ok());
-        let parsed = args.unwrap_or_else(|_| unreachable!());
-        assert!(parsed.validate().is_err());
+    fn test_cli_parse_rejects_out_of_range_width() {
+        for width in ["0", "9", "1001", "8000"] {
+            assert!(CliArgs::try_parse_from(["strmaid", "--width", width]).is_err());
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_accepts_width_bounds() {
+        for width in ["10", "1000"] {
+            assert!(CliArgs::try_parse_from(["strmaid", "--width", width]).is_ok());
+        }
     }
 
     #[test]

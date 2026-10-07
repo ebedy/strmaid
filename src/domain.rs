@@ -502,17 +502,15 @@ impl ViewportGeometry {
     /// Calcule le nombre de colonnes cibles pour le tracé matriciel en appliquant
     /// une compaction progressive sur les terminaux étroits (< 80 colonnes).
     #[must_use]
-    pub const fn target_columns(&self) -> u16 {
-        let cols = self.columns;
-        if cols >= 100 {
-            (cols * 9) / 10
-        } else if cols >= 80 {
-            (cols * 93) / 100
-        } else if cols >= 50 {
-            (cols * 96) / 100
-        } else {
-            cols
-        }
+    pub fn target_columns(&self) -> u16 {
+        let (numerator, denominator) = match self.columns {
+            100.. => (9, 10),
+            80..=99 => (93, 100),
+            50..=79 => (96, 100),
+            0..=49 => return self.columns,
+        };
+        let compacted = u32::from(self.columns) * numerator / denominator;
+        u16::try_from(compacted).unwrap_or(u16::MAX)
     }
 
     /// Calcule la largeur d'affichage en colonnes d'une chaîne (compatible CJK & emojis).
@@ -752,6 +750,12 @@ mod tests {
         assert_eq!(ViewportGeometry::new(50, 24).target_columns(), 48);
         assert_eq!(ViewportGeometry::new(40, 24).target_columns(), 40);
         assert_eq!(ViewportGeometry::new(20, 24).target_columns(), 20);
+    }
+
+    #[test]
+    fn test_viewport_geometry_target_columns_does_not_overflow() {
+        assert_eq!(ViewportGeometry::new(8000, 24).target_columns(), 7200);
+        assert_eq!(ViewportGeometry::new(u16::MAX, 24).target_columns(), 58981);
     }
 
     #[test]

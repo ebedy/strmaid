@@ -20,12 +20,14 @@ fn test_cli_rejects_invalid_theme() -> TestResult {
 }
 
 #[test]
-fn test_cli_rejects_zero_width() -> TestResult {
-    let mut cmd = strmaid_cmd()?;
-    cmd.arg("--width").arg("0");
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "la largeur --width doit être strictement supérieure à 0",
-    ));
+fn test_cli_rejects_out_of_range_width() -> TestResult {
+    for width in ["0", "8000"] {
+        let mut cmd = strmaid_cmd()?;
+        cmd.arg("--width").arg(width);
+        cmd.assert()
+            .code(2)
+            .stderr(predicate::str::contains("10..=1000"));
+    }
     Ok(())
 }
 
