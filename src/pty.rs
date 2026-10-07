@@ -94,12 +94,57 @@ pub fn write_raw_crlf<W: Write>(writer: &mut W, text: &str) -> Result<(), CliErr
     writer.flush().map_err(to_io_error)
 }
 
+/// Décodeur UTF-8 incrémental tolérant aux séquences coupées entre deux chunks.
+///
+/// Une séquence incomplète en fin de chunk (au plus 3 octets) est retenue jusqu'au
+/// chunk suivant ; seules les séquences réellement invalides deviennent U+FFFD.
+#[derive(Debug, Default)]
+pub struct Utf8ChunkDecoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8ChunkDecoder {
+    /// Décode un chunk en retenant l'éventuelle séquence incomplète finale.
+    pub fn decode(&mut self, chunk: &[u8]) -> String {
+        self.pending.extend_from_slice(chunk);
+        let tail = self.pending.split_off(incomplete_tail_start(&self.pending));
+        let decoded = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending = tail;
+        decoded
+    }
+
+    /// Restitue le reliquat en fin de flux, remplacé par U+FFFD s'il est tronqué.
+    pub fn finish(&mut self) -> String {
+        let remainder = std::mem::take(&mut self.pending);
+        String::from_utf8_lossy(&remainder).into_owned()
+    }
+}
+
+/// Position du début d'une séquence UTF-8 valide mais incomplète en fin de tampon,
+/// ou longueur du tampon si la fin est complète ou invalide.
+fn incomplete_tail_start(bytes: &[u8]) -> usize {
+    let search_from = bytes.len().saturating_sub(3);
+    bytes[search_from..]
+        .iter()
+        .rposition(|byte| !is_utf8_continuation(*byte))
+        .map(|offset| search_from + offset)
+        .filter(|&start| {
+            matches!(std::str::from_utf8(&bytes[start..]), Err(e) if e.error_len().is_none())
+        })
+        .unwrap_or(bytes.len())
+}
+
+const fn is_utf8_continuation(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
+}
+
 /// Processeur de flux interceptant les blocs Mermaid dans la sortie du PTY.
 pub struct PtyStreamProcessor<W: Write> {
     writer: W,
     options: RenderOptions,
     state: InterceptorState,
     pending_line: String,
+    decoder: Utf8ChunkDecoder,
 }
 
 impl<W: Write> PtyStreamProcessor<W> {
@@ -110,7 +155,17 @@ impl<W: Write> PtyStreamProcessor<W> {
             options,
             state: InterceptorState::Passthrough,
             pending_line: String::new(),
+            decoder: Utf8ChunkDecoder::default(),
         }
+    }
+
+    /// Traite un fragment d'octets bruts issu du PTY, décodé en UTF-8 incrémental.
+    ///
+    /// # Errors
+    /// Renvoie `CliError::Io` en cas d'erreur d'écriture.
+    pub fn process_bytes(&mut self, bytes: &[u8]) -> Result<(), CliError> {
+        let text = self.decoder.decode(bytes);
+        self.process_chunk(&text)
     }
 
     /// Traite un fragment de texte brut issu du PTY.
@@ -196,6 +251,10 @@ impl<W: Write> PtyStreamProcessor<W> {
     /// # Errors
     /// Renvoie `CliError::Io` en cas d'erreur d'écriture.
     pub fn finish(&mut self) -> Result<(), CliError> {
+        let undecoded_tail = self.decoder.finish();
+        if !undecoded_tail.is_empty() {
+            self.process_chunk(&undecoded_tail)?;
+        }
         if let InterceptorState::Capturing {
             buffer,
             opening_fence,
@@ -305,15 +364,11 @@ pub fn run_pty(command: &[String], options: RenderOptions) -> Result<u32, CliErr
 
     loop {
         match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                processor.process_chunk(&text)?;
-            }
+            Ok(bytes) => processor.process_bytes(&bytes)?,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 if let Ok(Some(_)) = child.try_wait() {
                     while let Ok(bytes) = rx.try_recv() {
-                        let text = String::from_utf8_lossy(&bytes);
-                        processor.process_chunk(&text)?;
+                        processor.process_bytes(&bytes)?;
                     }
                     break;
                 }
@@ -373,6 +428,50 @@ mod tests {
             assert!(write_raw_crlf(&mut out, input).is_ok());
             assert_eq!(String::from_utf8(out).unwrap_or_default(), expected);
         }
+    }
+
+    fn decode_chunks(chunks: &[&[u8]]) -> String {
+        let mut decoder = Utf8ChunkDecoder::default();
+        let text: String = chunks.iter().map(|chunk| decoder.decode(chunk)).collect();
+        text + &decoder.finish()
+    }
+
+    #[test]
+    fn test_utf8_decoder_joins_two_byte_char_split_across_chunks() {
+        assert_eq!(decode_chunks(&[b"caf\xc3", b"\xa9\n"]), "café\n");
+    }
+
+    #[test]
+    fn test_utf8_decoder_joins_four_byte_char_split_one_plus_three() {
+        assert_eq!(decode_chunks(&[b"\xf0", b"\x9f\x98\x80"]), "😀");
+    }
+
+    #[test]
+    fn test_utf8_decoder_replaces_isolated_invalid_byte_once() {
+        assert_eq!(decode_chunks(&[b"a\xffb"]), "a\u{fffd}b");
+    }
+
+    #[test]
+    fn test_utf8_decoder_replaces_truncated_tail_on_finish() {
+        let mut decoder = Utf8ChunkDecoder::default();
+        assert_eq!(decoder.decode(b"ok\xc3"), "ok");
+        assert_eq!(decoder.finish(), "\u{fffd}");
+        assert_eq!(decoder.finish(), "");
+    }
+
+    #[test]
+    fn test_utf8_decoder_handles_empty_input() {
+        assert_eq!(decode_chunks(&[b"", b""]), "");
+    }
+
+    #[test]
+    fn test_pty_processor_decodes_bytes_split_across_chunks() {
+        let mut out = Vec::new();
+        let mut processor = PtyStreamProcessor::new(&mut out, RenderOptions::default());
+        assert!(processor.process_bytes(b"\xc3").is_ok());
+        assert!(processor.process_bytes(b"\xa9t\xc3").is_ok());
+        assert!(processor.finish().is_ok());
+        assert_eq!(String::from_utf8(out).unwrap_or_default(), "ét\u{fffd}");
     }
 
     #[test]
