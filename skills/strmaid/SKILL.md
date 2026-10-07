@@ -15,7 +15,7 @@ Ce skill fournit les procédures et directives permettant à un agent IA de pilo
 2. **Diagnostiquer les capacités du terminal hôte (`strmaid doctor`)** pour auditer l'environnement, le protocole graphique optimal et la géométrie avant tout affichage.
 3. **Valider et auto-corriger** la syntaxe de diagrammes Mermaid sans dépendance JavaScript ni navigateur headless (boucle de self-healing ultra-rapide < 10 ms).
 4. **Piloter les moteurs de génération vectorielle (`--engine`)** en choisissant le moteur adapté (`mermaid-svg` par défaut, `merman` avec disposition ELK pour diagrammes complexes).
-5. **Garantir la résilience et l'adaptation au terminal** via l'auto-orientation adaptative (`--no-auto-orient`), les gardes temporelles (`--timeout-ms`) et le repli intelligent vers `AsciiBox` (`--no-fallback-asciibox`).
+5. **Garantir la résilience et l'adaptation au terminal** via l'auto-orientation adaptative (`--no-auto-orient`), les gardes temporelles (`--timeout-ms`), le repli intelligent vers `AsciiBox` (`--no-fallback-asciibox`) et la neutralisation des séquences terminales non fiables (`--raw-passthrough` pour la désactiver).
 6. **Auditer la conformité** de documents Markdown contenant plusieurs blocs Mermaid via une sortie structurée machine-readable JSON ou NDJSON (streaming en continu).
 7. **Prévisualiser des diagrammes** directement dans la console ou dans les terminaux intégrés d'éditeurs (Neovim, VSCode, Helix) avec ajustement adaptatif au viewport et gestion de 7 thèmes visuels.
 8. **Intercepter les flux interactifs en pseudo-terminal (`strmaid run <cmd...>`)** pour visualiser dynamiquement les diagrammes générés par des CLI d'agents (ex. Antigravity `agy`, Claude Code) ou des scripts.
@@ -163,7 +163,8 @@ strmaid doctor --format json
     "svg_generated": true,
     "rasterized": true,
     "raster_dimensions": [248, 92],
-    "error": null
+    "error": null,
+    "font_faces": 2369
   },
   "healthy": true
 }
@@ -171,6 +172,7 @@ strmaid doctor --format json
 **Règle pour l'agent :**
 - Vérifier `healthy == true` pour s'assurer du bon fonctionnement de la chaîne de rendu.
 - Consulter `detected_protocol` pour adapter les instructions de rendu (priorité : `kitty` > `iterm2` > `halfblocks` > `asciibox`).
+- Si `pipeline.font_faces == 0`, aucune police système n'est disponible : les rendus graphiques basculent automatiquement en `AsciiBox` (avertissement `Polices indisponibles`). Recommander l'installation d'un paquet de polices (`fonts-dejavu`, `fonts-noto`) ou demander directement `--graphics asciibox`.
 
 ---
 
@@ -196,6 +198,8 @@ En cas de code de sortie `1`, `strmaid` émet un diagnostic précis indiquant le
 ```text
 ⚠️  [Rendu Mermaid indisponible: Erreur syntaxe Mermaid: ligne 2: unexpected text: '...']
 ```
+Le bloc restitué après l'avertissement est neutralisé (aucune séquence de contrôle terminal) et sa clôture Markdown peut compter plus de trois backticks lorsque le contenu en contient lui-même : extraire le contenu entre les clôtures de même longueur, pas entre deux `` ``` `` fixes.
+
 **Règle pour l'agent :**
 1. Capturer le numéro de ligne rapporté par l'erreur.
 2. Corriger le symbole, la liaison ou le nœud incriminé.
@@ -296,7 +300,12 @@ Lorsqu'un rendu matriciel haute fidélité échoue en cours de route (ex. dépas
   strmaid --no-fallback-asciibox diagram.md
   ```
 
-### E. Protocoles Graphiques Supportés (`-g`, `--graphics`)
+### E. Neutralisation des Séquences Terminales (`--raw-passthrough`)
+- Le contenu des blocs en repli, les messages d'erreur et toutes les lignes du pager sont débarrassés des séquences de contrôle (OSC, DCS, APC, PM, SOS, CSI) et des caractères de contrôle C0/C1 hors `\n` et `\t`.
+- En mode filtre, le texte Markdown hors diagramme conserve uniquement ses couleurs SGR (`ESC [ … m`) : OSC 52 (presse-papiers), changement de titre et images Kitty injectées sont supprimés.
+- `--raw-passthrough` rétablit le relais brut du texte Markdown (mode filtre uniquement), à réserver aux sources de confiance.
+
+### F. Protocoles Graphiques Supportés (`-g`, `--graphics`)
 - `kitty` : Rendu natif GPU pixel-perfect pour Warp, Kitty, WezTerm, Ghostty.
 - `iterm2` : Protocole d'affichage d'images pour iTerm2 et terminaux compatibles macOS.
 - `halfblocks` : Repli universel demi-blocs Unicode (`▀`, `▄`) TrueColor 24-bit (compatible Windows Terminal, PowerShell, CMD, et tous terminaux Linux/macOS modernes).
@@ -304,14 +313,16 @@ Lorsqu'un rendu matriciel haute fidélité échoue en cours de route (ex. dépas
 - `raw` : Sortie brute vectorielle SVG sans conversion matricielle.
 
 ```bash
-# Rendu demi-blocs TrueColor 24-bit calibré à 80 colonnes :
+# Rendu demi-blocs TrueColor 24-bit calibré à 80 colonnes (--width accepte 10 à 1000) :
 strmaid --block-only --width 80 diagram.mmd
 
 # Repli en art Unicode box-drawing pour sessions SSH dégradées ou CI monochrome :
 strmaid --block-only --width 60 --graphics asciibox diagram.mmd
 ```
 
-### F. Thèmes Visuels (`-t`, `--theme`)
+- Dans le pager interactif (`--pager`), les diagrammes sont toujours tracés en `AsciiBox` monochrome, seul rendu représentable par `ratatui` ; utiliser `--no-pager` pour un rendu graphique.
+
+### G. Thèmes Visuels (`-t`, `--theme`)
 Sélectionner la palette adéquate selon le contexte :
 - `--theme dark` (défaut) : Contraste optimisé pour terminaux à fond sombre.
 - `--theme light` : Palette adaptée aux fonds clairs ou blancs.
@@ -367,3 +378,8 @@ strmaid run agy --dangerously-skip-permissions --conversation=<CONVERSATION_ID>
 strmaid run python3 mon_agent.py
 ```
 L'application cible conserve toutes ses capacités TTY (raw mode, gestion des touches, couleurs ANSI) tandis que les blocs ```` ```mermaid ```` sont détectés, rendus graphiquement et réinjectés dans l'affichage terminal.
+
+**Règles pour l'agent :**
+- Le code de sortie de `strmaid run` est celui de la commande enfant (borné à 255) : l'interpréter comme tel pour décider d'un succès ou d'un échec.
+- Les retours chariot isolés (barres de progression) et les caractères UTF-8 multi-octets sont restitués fidèlement.
+- La sortie de l'enfant n'est pas filtrée (préservation des applications plein écran) : ne lancer via `run` que des commandes de confiance.
