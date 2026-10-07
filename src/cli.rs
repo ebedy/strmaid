@@ -79,6 +79,11 @@ pub struct CliArgs {
     /// Désactiver le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique.
     #[arg(long = "no-fallback-asciibox")]
     pub no_fallback_asciibox: bool,
+
+    /// Relayer le texte Markdown hors diagramme tel quel, sans neutraliser les séquences
+    /// terminales actives (OSC, DCS, APC). Par défaut, seules les couleurs SGR sont conservées.
+    #[arg(long = "raw-passthrough")]
+    pub raw_passthrough: bool,
 }
 
 /// Sous-commandes disponibles pour `strmaid`.

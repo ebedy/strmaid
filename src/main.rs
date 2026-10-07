@@ -5,7 +5,9 @@ use std::io::{self, BufRead, BufReader, IsTerminal};
 use std::process::ExitCode;
 use strmaid::cli::{CliArgs, Subcommands};
 use strmaid::doctor;
-use strmaid::domain::{CliError, ExecutionMode, OutputFormat, ResourceLimits, ViewportGeometry};
+use strmaid::domain::{
+    CliError, ExecutionMode, OutputFormat, ResourceLimits, ViewportGeometry, sanitize_terminal_text,
+};
 use strmaid::filter;
 use strmaid::mcp;
 use strmaid::pager;
@@ -46,7 +48,11 @@ fn main() -> ExitCode {
     match run_app(&args) {
         Ok(outcome) => ExitCode::from(outcome),
         Err(err) => {
-            eprintln!("\x1b[31mErreur:\x1b[0m {err}");
+            let message = err.to_string();
+            eprintln!(
+                "\x1b[31mErreur:\x1b[0m {}",
+                sanitize_terminal_text(&message)
+            );
             ExitCode::FAILURE
         }
     }
@@ -144,6 +150,7 @@ fn build_render_options(args: &CliArgs) -> RenderOptions {
         .with_auto_orient(!args.no_auto_orient)
         .with_engine(args.engine)
         .with_fallback_asciibox(!args.no_fallback_asciibox)
+        .with_raw_passthrough(args.raw_passthrough)
 }
 
 fn execute_with_reader<R: BufRead + Send + 'static>(

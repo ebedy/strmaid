@@ -120,6 +120,7 @@ strmaid [OPTIONS] [FILE]
 | `--no-auto-orient` | *Aucun* | Désactive l'auto-orientation préventive (`LR`/`RL` $\rightarrow$ `TD`) sur terminaux étroits (< 120 cols). |
 | `--timeout-ms` | `MS` | Délai maximal d'exécution d'un rendu de diagramme en millisecondes (par défaut : `5000`, `0` pour désactiver). |
 | `--no-fallback-asciibox` | *Aucun* | Désactive le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique et restitue le code brut. |
+| `--raw-passthrough` | *Aucun* | Relaie le texte Markdown hors diagramme tel quel. Par défaut, les séquences terminales actives (OSC, DCS, APC, CSI hors couleurs) sont neutralisées et seules les couleurs SGR sont conservées. |
 | `--format` | `human` \| `json` \| `ndjson` | Format de sortie des flux analysés (par défaut : `human`). |
 | `-h`, `--help` | *Aucun* | Affiche l'aide de la commande. |
 | `-V`, `--version` | *Aucun* | Affiche la version de l'application. |

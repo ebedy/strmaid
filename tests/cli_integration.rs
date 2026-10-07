@@ -151,3 +151,30 @@ fn test_cli_run_propagates_child_exit_code() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn test_cli_fallback_output_contains_no_osc_sequence() -> TestResult {
+    let input = "intro\x1b]52;c;ZXZpbA==\x07\n```mermaid\nxyz \x1b]0;PWNED\x07 $$$\n```\nfin\n";
+    let mut cmd = strmaid_cmd()?;
+    cmd.arg("--no-pager").arg("-g").arg("halfblocks");
+    let output = cmd.write_stdin(input).output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success());
+    assert!(stdout.contains("Rendu Mermaid indisponible"));
+    assert!(stdout.contains("fin"));
+    assert!(!stdout.contains("\x1b]"), "OSC sur stdout : {stdout:?}");
+    assert!(!stderr.contains("\x1b]"), "OSC sur stderr : {stderr:?}");
+    Ok(())
+}
+
+#[test]
+fn test_cli_raw_passthrough_relays_markdown_text() -> TestResult {
+    let mut cmd = strmaid_cmd()?;
+    cmd.arg("--no-pager").arg("--raw-passthrough");
+    cmd.write_stdin("a\x1b]0;titre\x07b\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a\x1b]0;titre\x07b"));
+    Ok(())
+}
