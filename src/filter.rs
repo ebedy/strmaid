@@ -133,7 +133,7 @@ fn drive_stream<R: BufRead>(
     for line_result in LossyLines::new(reader) {
         let line = line_result?;
         utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
-        if let Some(item) = machine.process_line(&line.text)? {
+        if let Some(item) = machine.process_line(&line.text) {
             on_item(&item)?;
         }
     }
@@ -166,13 +166,19 @@ fn write_human_item<W: Write>(
         }
         StreamItem::Diagram(diagram) => {
             let rendered = renderer::render_diagram(diagram, options);
-            write!(writer, "{rendered}").map_err(|err| CliError::Io(err.to_string()))?;
-            writer
-                .flush()
-                .map_err(|err| CliError::Io(err.to_string()))?;
+            write_flushed(writer, &rendered)?;
+        }
+        StreamItem::OversizedDiagram { skipped_bytes } => {
+            let notice = renderer::render_oversized_notice(*skipped_bytes, options);
+            write_flushed(writer, &notice)?;
         }
     }
     Ok(())
+}
+
+fn write_flushed<W: Write>(writer: &mut W, rendered: &str) -> Result<(), CliError> {
+    write!(writer, "{rendered}").map_err(|err| CliError::Io(err.to_string()))?;
+    writer.flush().map_err(|err| CliError::Io(err.to_string()))
 }
 
 /// Texte Markdown relayé : séquences actives neutralisées sauf `--raw-passthrough`.
@@ -244,11 +250,21 @@ fn convert_to_json_item(
             content: text.clone(),
         },
         StreamItem::Diagram(diagram) => {
-            let index = *diagram_index;
-            *diagram_index = diagram_index.saturating_add(1);
-            renderer::analyze_and_render_diagram(diagram, options, index)
+            renderer::analyze_and_render_diagram(diagram, options, next_index(diagram_index))
         }
+        StreamItem::OversizedDiagram { skipped_bytes } => renderer::oversized_diagram_json_item(
+            *skipped_bytes,
+            options,
+            next_index(diagram_index),
+        ),
     }
+}
+
+/// Retourne l'index courant de diagramme puis l'incrémente.
+fn next_index(diagram_index: &mut usize) -> usize {
+    let index = *diagram_index;
+    *diagram_index = diagram_index.saturating_add(1);
+    index
 }
 
 fn build_json_document(items: Vec<JsonStreamItem>, options: RenderOptions) -> JsonDocumentOutput {
@@ -346,24 +362,59 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output), input);
     }
 
+    fn small_limits_options() -> RenderOptions {
+        RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            ResourceLimits {
+                max_diagram_bytes: 4,
+                ..ResourceLimits::default()
+            },
+        )
+    }
+
     #[test]
-    fn test_run_filter_with_oversized_diagram_returns_error() {
-        let input = "```mermaid\n123456789\n```\n";
-        let reader = Cursor::new(input);
+    fn test_run_filter_skips_oversized_diagram_and_continues() {
+        let input = "avant\n```mermaid\n123456789\n```\napres\n";
         let mut output = Vec::new();
-        let limits = ResourceLimits {
-            max_diagram_bytes: 4,
-            ..ResourceLimits::default()
-        };
+
+        let res = run_filter(Cursor::new(input), &mut output, small_limits_options());
+        assert!(res.is_ok());
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(output_str.contains("avant"));
+        assert!(output_str.contains("Diagramme Mermaid ignoré"));
+        assert!(output_str.contains("apres"));
+        assert!(!output_str.contains("123456789"));
+    }
+
+    #[test]
+    fn test_run_filter_json_reports_oversized_diagram_as_resource_limit() {
+        let oversized = "x".repeat(40);
+        let input = format!("```mermaid\n{oversized}\n```\n```mermaid\ngraph LR\nA-->B\n```\n");
+        let mut output = Vec::new();
         let options = RenderOptions::with_limits(
             ThemeMode::Dark,
             GraphicsProtocol::HalfBlocks,
             ViewportGeometry::new(80, 24),
-            limits,
-        );
+            ResourceLimits {
+                max_diagram_bytes: 32,
+                ..ResourceLimits::default()
+            },
+        )
+        .with_format(OutputFormat::Json);
 
-        let res = run_filter(reader, &mut output, options);
-        assert!(matches!(res, Err(CliError::ResourceLimit(_))));
+        assert!(run_filter(Cursor::new(input), &mut output, options).is_ok());
+        let doc: serde_json::Value = serde_json::from_slice(&output).unwrap_or_default();
+        let first = &doc["items"][0];
+        assert_eq!(first["type"], "diagram");
+        assert_eq!(first["index"], 0);
+        assert_eq!(first["valid"], false);
+        assert_eq!(first["error"]["kind"], "ResourceLimit");
+        assert_eq!(first["raw_content"], "");
+        assert_eq!(doc["items"][1]["index"], 1);
+        assert_eq!(doc["items"][1]["valid"], true);
+        assert_eq!(doc["summary"]["invalid_diagrams"], 1);
     }
 
     #[test]

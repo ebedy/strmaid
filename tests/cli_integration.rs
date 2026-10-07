@@ -193,3 +193,20 @@ fn test_cli_filter_tolerates_invalid_utf8_with_single_warning() -> TestResult {
     assert_eq!(stderr.matches("UTF-8").count(), 1, "stderr : {stderr}");
     Ok(())
 }
+
+#[test]
+fn test_cli_filter_continues_after_oversized_diagram() -> TestResult {
+    let edges = "  A --> B\n".repeat(250_000);
+    let input = format!("AVANT\n```mermaid\nflowchart TD\n{edges}```\nAPRES_TEXTE\n");
+    assert!(input.len() > 2_000_000);
+
+    let mut cmd = strmaid_cmd()?;
+    cmd.arg("--no-pager").arg("-g").arg("halfblocks");
+    cmd.write_stdin(input)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("AVANT"))
+        .stdout(predicate::str::contains("Diagramme Mermaid ignoré"))
+        .stdout(predicate::str::contains("APRES_TEXTE"));
+    Ok(())
+}

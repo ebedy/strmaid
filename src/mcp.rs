@@ -401,7 +401,7 @@ fn detect_markdown_diagrams(markdown: &str) -> DetectOutput {
     let mut blocks = Vec::new();
 
     for line in markdown.lines() {
-        if let Ok(Some(StreamItem::Diagram(block))) = machine.process_line(line) {
+        if let Some(StreamItem::Diagram(block)) = machine.process_line(line) {
             blocks.push(build_detected_block(&block));
         }
     }
