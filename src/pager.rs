@@ -2,7 +2,7 @@ use crate::domain::{
     CliError, GraphicsProtocol, ThemeMode, ViewportGeometry, sanitize_terminal_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -177,11 +177,11 @@ fn spawn_reader_thread<R: BufRead + Send + 'static>(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut machine = StreamStateMachine::with_limits(limits);
-        for line_result in reader.lines() {
+        for line_result in LossyLines::new(reader) {
             let line = match line_result {
-                Ok(line) => line,
+                Ok(line) => line.text,
                 Err(err) => {
-                    let _ = tx.send(Err(CliError::Io(err.to_string())));
+                    let _ = tx.send(Err(err));
                     return;
                 }
             };
@@ -588,6 +588,19 @@ mod tests {
         assert!(res2.is_ok());
         assert!(app.stream_finished);
         assert_eq!(app.lines, vec!["line A", "line B"]);
+    }
+
+    #[test]
+    fn test_reader_thread_tolerates_invalid_utf8() {
+        let input: &[u8] = b"avant\n\xff\napres\n";
+        let rx = spawn_reader_thread(Cursor::new(input), ResourceLimits::default());
+        let mut app = PagerApp::new();
+
+        thread::sleep(Duration::from_millis(50));
+        let res = consume_pending_items(&mut app, &rx, RenderOptions::default());
+        assert!(res.is_ok());
+        assert!(app.stream_finished);
+        assert_eq!(app.lines, vec!["avant", "\u{fffd}", "apres"]);
     }
 
     #[test]

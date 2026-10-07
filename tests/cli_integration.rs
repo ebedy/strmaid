@@ -178,3 +178,18 @@ fn test_cli_raw_passthrough_relays_markdown_text() -> TestResult {
         .stdout(predicate::str::contains("a\x1b]0;titre\x07b"));
     Ok(())
 }
+
+#[test]
+fn test_cli_filter_tolerates_invalid_utf8_with_single_warning() -> TestResult {
+    let mut cmd = strmaid_cmd()?;
+    cmd.arg("--no-pager");
+    let output = cmd
+        .write_stdin(b"ok\n\xff\xfe\nsuite\n\xc3\n".to_vec())
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr : {stderr}");
+    assert!(stdout.contains("suite"));
+    assert_eq!(stderr.matches("UTF-8").count(), 1, "stderr : {stderr}");
+    Ok(())
+}

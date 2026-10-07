@@ -2,7 +2,7 @@ use crate::domain::{CliError, DiagramBlock, ResourceLimits, ThemeMode, strip_mer
 use crate::mermaid;
 use crate::rasterizer;
 use crate::renderer;
-use crate::stream::{StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
 use base64::prelude::*;
 use resvg::tiny_skia::PixmapRef;
 use serde::{Deserialize, Serialize};
@@ -113,9 +113,11 @@ pub struct ToolCallResult {
 /// # Errors
 /// Renvoie `CliError::Io` en cas d'erreur de lecture ou d'écriture irrécupérable.
 pub fn run_mcp_server<R: BufRead, W: Write>(reader: R, mut writer: W) -> Result<(), CliError> {
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        let trimmed = line.trim();
+    let mut utf8_reported = false;
+    for line_result in LossyLines::new(reader) {
+        let line = line_result?;
+        utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
+        let trimmed = line.text.trim();
         if trimmed.is_empty() {
             continue;
         }
@@ -470,6 +472,24 @@ mod tests {
         assert!(resp.error.is_none());
         let result = resp.result.unwrap_or(Value::Null);
         assert_eq!(result["serverInfo"]["name"], "strmaid");
+    }
+
+    #[test]
+    fn test_mcp_server_survives_invalid_utf8_line() {
+        let input: &[u8] =
+            b"\xff\xfe garbage\n{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"initialize\",\"params\":{}}\n";
+        let mut output = Vec::new();
+        assert!(run_mcp_server(Cursor::new(input), &mut output).is_ok());
+
+        let out_str = String::from_utf8(output).unwrap_or_default();
+        let responses: Vec<JsonRpcResponse> = out_str
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].error.is_some());
+        assert_eq!(responses[1].id, json!(7));
+        assert!(responses[1].error.is_none());
     }
 
     #[test]

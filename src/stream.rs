@@ -1,5 +1,71 @@
 use crate::domain::{CliError, DiagramBlock, DiagramMetadata, ResourceLimits};
+use std::io::BufRead;
 use std::mem;
+
+/// Ligne d'entrée décodée en UTF-8 de manière tolérante.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LossyLine {
+    /// Contenu sans le `\n` final ; les séquences invalides deviennent U+FFFD.
+    pub text: String,
+    /// Indique qu'au moins un octet invalide a été remplacé.
+    pub had_invalid_utf8: bool,
+}
+
+/// Itérateur de lignes tolérant aux octets non UTF-8, à la différence de
+/// `BufRead::lines()` qui interrompt le flux sur la première séquence invalide.
+pub struct LossyLines<R> {
+    reader: R,
+    buffer: Vec<u8>,
+}
+
+impl<R: BufRead> LossyLines<R> {
+    #[must_use]
+    pub const fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buffer: Vec::new(),
+        }
+    }
+}
+
+impl<R: BufRead> Iterator for LossyLines<R> {
+    type Item = Result<LossyLine, CliError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.reader.read_until(b'\n', &mut self.buffer) {
+            Ok(0) => None,
+            Ok(_) => Some(Ok(decode_lossy_line(mem::take(&mut self.buffer)))),
+            Err(err) => Some(Err(CliError::Io(err.to_string()))),
+        }
+    }
+}
+
+fn decode_lossy_line(mut bytes: Vec<u8>) -> LossyLine {
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => LossyLine {
+            text,
+            had_invalid_utf8: false,
+        },
+        Err(err) => LossyLine {
+            text: String::from_utf8_lossy(err.as_bytes()).into_owned(),
+            had_invalid_utf8: true,
+        },
+    }
+}
+
+/// Émet sur stderr un avertissement unique à la première ligne contenant des octets
+/// non UTF-8. Retourne le nouvel état « déjà signalé ».
+#[must_use]
+pub fn report_invalid_utf8_once(line: &LossyLine, already_reported: bool) -> bool {
+    if already_reported || !line.had_invalid_utf8 {
+        return already_reported;
+    }
+    eprintln!("\x1b[33m⚠️  [Octets non UTF-8 remplacés par U+FFFD dans le flux d'entrée]\x1b[0m");
+    true
+}
 
 /// Élément produit par la machine à états de streaming.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +294,50 @@ mod tests {
             assert_eq!(block.theme_override(), Some(crate::domain::ThemeMode::Neon));
             assert_eq!(block.width_override(), Some(70));
         }
+    }
+
+    fn collect_lossy(input: &[u8]) -> Vec<(String, bool)> {
+        LossyLines::new(input)
+            .map(|line| line.map(|l| (l.text, l.had_invalid_utf8)))
+            .collect::<Result<_, _>>()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_lossy_lines_replaces_invalid_bytes_and_continues() {
+        assert_eq!(
+            collect_lossy(b"ok\n\xff\xfe\nsuite\n"),
+            vec![
+                ("ok".to_string(), false),
+                ("\u{fffd}\u{fffd}".to_string(), true),
+                ("suite".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lossy_lines_keeps_last_line_without_newline() {
+        assert_eq!(
+            collect_lossy(b"a\nfin"),
+            vec![("a".to_string(), false), ("fin".to_string(), false)]
+        );
+    }
+
+    #[test]
+    fn test_lossy_lines_handles_empty_input_and_empty_lines() {
+        assert_eq!(collect_lossy(b""), Vec::new());
+        assert_eq!(
+            collect_lossy(b"\n\n"),
+            vec![(String::new(), false), (String::new(), false)]
+        );
+    }
+
+    #[test]
+    fn test_lossy_lines_keeps_carriage_return_for_state_machine() {
+        assert_eq!(
+            collect_lossy(b"crlf\r\n"),
+            vec![("crlf\r".to_string(), false)]
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use crate::domain::{
     CliError, DiagramBlock, JsonDocumentOutput, JsonStreamItem, JsonStreamSummary, OutputFormat,
-    sanitize_passthrough_text,
+    ResourceLimits, sanitize_passthrough_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
@@ -121,24 +121,33 @@ pub fn run_filter<R: BufRead, W: Write>(
     }
 }
 
+/// Parcourt le flux d'entrée ligne à ligne (UTF-8 tolérant) et transmet chaque élément
+/// produit par la machine à états, y compris celui émis à l'EOF.
+fn drive_stream<R: BufRead>(
+    reader: R,
+    limits: ResourceLimits,
+    mut on_item: impl FnMut(&StreamItem) -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    let mut machine = StreamStateMachine::with_limits(limits);
+    let mut utf8_reported = false;
+    for line_result in LossyLines::new(reader) {
+        let line = line_result?;
+        utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
+        if let Some(item) = machine.process_line(&line.text)? {
+            on_item(&item)?;
+        }
+    }
+    machine.finish().map_or(Ok(()), |item| on_item(&item))
+}
+
 fn run_human_filter<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
     options: RenderOptions,
 ) -> Result<(), CliError> {
-    let mut machine = StreamStateMachine::with_limits(options.limits);
-
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        if let Some(item) = machine.process_line(&line)? {
-            write_human_item(&mut writer, &item, options)?;
-        }
-    }
-
-    if let Some(item) = machine.finish() {
-        write_human_item(&mut writer, &item, options)?;
-    }
-
+    drive_stream(reader, options.limits, |item| {
+        write_human_item(&mut writer, item, options)
+    })?;
     writer
         .flush()
         .map_err(|err| CliError::Io(err.to_string()))?;
@@ -179,20 +188,10 @@ fn run_ndjson_filter<R: BufRead, W: Write>(
     mut writer: W,
     options: RenderOptions,
 ) -> Result<(), CliError> {
-    let mut machine = StreamStateMachine::with_limits(options.limits);
     let mut diagram_index = 0_usize;
-
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        if let Some(item) = machine.process_line(&line)? {
-            write_ndjson_item(&mut writer, &item, options, &mut diagram_index)?;
-        }
-    }
-
-    if let Some(item) = machine.finish() {
-        write_ndjson_item(&mut writer, &item, options, &mut diagram_index)?;
-    }
-
+    drive_stream(reader, options.limits, |item| {
+        write_ndjson_item(&mut writer, item, options, &mut diagram_index)
+    })?;
     writer
         .flush()
         .map_err(|err| CliError::Io(err.to_string()))?;
@@ -219,20 +218,12 @@ fn run_json_filter<R: BufRead, W: Write>(
     mut writer: W,
     options: RenderOptions,
 ) -> Result<(), CliError> {
-    let mut machine = StreamStateMachine::with_limits(options.limits);
     let mut diagram_index = 0_usize;
     let mut items = Vec::new();
-
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        if let Some(item) = machine.process_line(&line)? {
-            items.push(convert_to_json_item(&item, options, &mut diagram_index));
-        }
-    }
-
-    if let Some(item) = machine.finish() {
-        items.push(convert_to_json_item(&item, options, &mut diagram_index));
-    }
+    drive_stream(reader, options.limits, |item| {
+        items.push(convert_to_json_item(item, options, &mut diagram_index));
+        Ok(())
+    })?;
 
     let doc = build_json_document(items, options);
     serde_json::to_writer_pretty(&mut writer, &doc).map_err(|err| CliError::Io(err.to_string()))?;
@@ -330,6 +321,18 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output),
             "\x1b[32mvert\x1b[0m fin\n"
+        );
+    }
+
+    #[test]
+    fn test_run_filter_tolerates_invalid_utf8_bytes() {
+        let input: &[u8] = b"ok\n\xff\xfe\nsuite\n";
+        let mut output = Vec::new();
+        let res = run_filter(Cursor::new(input), &mut output, RenderOptions::default());
+        assert!(res.is_ok());
+        assert_eq!(
+            String::from_utf8_lossy(&output),
+            "ok\n\u{fffd}\u{fffd}\nsuite\n"
         );
     }
 
