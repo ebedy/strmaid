@@ -20,12 +20,14 @@ fn test_cli_rejects_invalid_theme() -> TestResult {
 }
 
 #[test]
-fn test_cli_rejects_zero_width() -> TestResult {
-    let mut cmd = strmaid_cmd()?;
-    cmd.arg("--width").arg("0");
-    cmd.assert().failure().stderr(predicate::str::contains(
-        "la largeur --width doit être strictement supérieure à 0",
-    ));
+fn test_cli_rejects_out_of_range_width() -> TestResult {
+    for width in ["0", "8000"] {
+        let mut cmd = strmaid_cmd()?;
+        cmd.arg("--width").arg(width);
+        cmd.assert()
+            .code(2)
+            .stderr(predicate::str::contains("10..=1000"));
+    }
     Ok(())
 }
 
@@ -136,5 +138,16 @@ fn test_cli_run_intercepts_diagram() -> TestResult {
         .stdout(predicate::str::contains("intro"))
         .stdout(predicate::str::contains("outro"))
         .stdout(predicate::str::contains("```mermaid").not());
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn test_cli_run_propagates_child_exit_code() -> TestResult {
+    for (script, expected_code) in [("exit 42", 42), ("exit 0", 0), ("exit 1", 1)] {
+        let mut cmd = strmaid_cmd()?;
+        cmd.arg("run").arg("--").arg("sh").arg("-c").arg(script);
+        cmd.assert().code(expected_code);
+    }
     Ok(())
 }

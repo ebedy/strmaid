@@ -13,11 +13,38 @@ use strmaid::protocol;
 use strmaid::pty;
 use strmaid::renderer::RenderOptions;
 
+/// Issue d'une exécution, convertie en code de sortie du processus.
+enum AppOutcome {
+    Success,
+    Failure,
+    /// Code de sortie d'un processus enfant (`strmaid run`), propagé tel quel.
+    ChildExit(u32),
+}
+
+impl From<bool> for AppOutcome {
+    fn from(success: bool) -> Self {
+        if success {
+            Self::Success
+        } else {
+            Self::Failure
+        }
+    }
+}
+
+impl From<AppOutcome> for ExitCode {
+    fn from(outcome: AppOutcome) -> Self {
+        match outcome {
+            AppOutcome::Success => Self::SUCCESS,
+            AppOutcome::Failure => Self::FAILURE,
+            AppOutcome::ChildExit(code) => Self::from(u8::try_from(code).unwrap_or(u8::MAX)),
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args = CliArgs::parse();
     match run_app(&args) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::FAILURE,
+        Ok(outcome) => ExitCode::from(outcome),
         Err(err) => {
             eprintln!("\x1b[31mErreur:\x1b[0m {err}");
             ExitCode::FAILURE
@@ -25,20 +52,19 @@ fn main() -> ExitCode {
     }
 }
 
-fn run_app(args: &CliArgs) -> Result<bool, CliError> {
+fn run_app(args: &CliArgs) -> Result<AppOutcome, CliError> {
     args.validate()?;
 
     if let Some(subcommand) = &args.command {
         return match subcommand {
-            Subcommands::Doctor { format } => doctor::run_doctor(*format),
+            Subcommands::Doctor { format } => doctor::run_doctor(*format).map(AppOutcome::from),
             Subcommands::Mcp => {
                 mcp::run_mcp_server(io::stdin().lock(), io::stdout().lock())?;
-                Ok(true)
+                Ok(AppOutcome::Success)
             }
             Subcommands::Run { command } => {
                 let options = build_render_options(args);
-                let exit_code = pty::run_pty(command, options)?;
-                Ok(exit_code == 0)
+                pty::run_pty(command, options).map(AppOutcome::ChildExit)
             }
         };
     }
@@ -46,11 +72,11 @@ fn run_app(args: &CliArgs) -> Result<bool, CliError> {
     let options = build_render_options(args);
 
     if args.block_only {
-        return execute_block_only(args, options);
+        return execute_block_only(args, options).map(AppOutcome::from);
     }
 
     let mode = determine_execution_mode(args);
-    execute_stream(args, mode, options)
+    execute_stream(args, mode, options).map(AppOutcome::from)
 }
 
 fn execute_block_only(args: &CliArgs, options: RenderOptions) -> Result<bool, CliError> {
