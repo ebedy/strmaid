@@ -75,24 +75,23 @@ pub fn is_fence_end(line: &str) -> bool {
 
 /// Écrit du texte dans le terminal brut en garantissant la séquence CR-LF.
 ///
+/// Chaque `\n` nu devient `\r\n` ; les `\r\n` existants et les `\r` isolés
+/// (barres de progression, réécriture de ligne) sont conservés tels quels.
+///
 /// # Errors
 /// Renvoie `CliError::Io` en cas d'erreur d'écriture.
 pub fn write_raw_crlf<W: Write>(writer: &mut W, text: &str) -> Result<(), CliError> {
-    for ch in text.chars() {
-        if ch == '\n' {
-            writer
-                .write_all(b"\r\n")
-                .map_err(|e| CliError::Io(e.to_string()))?;
-        } else if ch != '\r' {
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            writer
-                .write_all(s.as_bytes())
-                .map_err(|e| CliError::Io(e.to_string()))?;
-        }
+    let to_io_error = |e: std::io::Error| CliError::Io(e.to_string());
+    for segment in text.split_inclusive('\n') {
+        let Some(body) = segment.strip_suffix('\n') else {
+            writer.write_all(segment.as_bytes()).map_err(to_io_error)?;
+            continue;
+        };
+        let line_ending: &[u8] = if body.ends_with('\r') { b"\n" } else { b"\r\n" };
+        writer.write_all(body.as_bytes()).map_err(to_io_error)?;
+        writer.write_all(line_ending).map_err(to_io_error)?;
     }
-    writer.flush().map_err(|e| CliError::Io(e.to_string()))?;
-    Ok(())
+    writer.flush().map_err(to_io_error)
 }
 
 /// Processeur de flux interceptant les blocs Mermaid dans la sortie du PTY.
@@ -360,6 +359,29 @@ mod tests {
         assert!(res.is_ok());
         let res_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(res_str, "Ligne 1\r\nLigne 2\r\nLigne 3");
+    }
+
+    #[test]
+    fn test_write_raw_crlf_preserves_lone_carriage_returns() {
+        for (input, expected) in [
+            ("a\rb\n", "a\rb\r\n"),
+            ("a\r\n", "a\r\n"),
+            ("\n", "\r\n"),
+            ("10%\r20%\r", "10%\r20%\r"),
+        ] {
+            let mut out = Vec::new();
+            assert!(write_raw_crlf(&mut out, input).is_ok());
+            assert_eq!(String::from_utf8(out).unwrap_or_default(), expected);
+        }
+    }
+
+    #[test]
+    fn test_pty_processor_preserves_lone_carriage_return() {
+        let mut out = Vec::new();
+        let mut processor = PtyStreamProcessor::new(&mut out, RenderOptions::default());
+        assert!(processor.process_chunk("a\rb\n").is_ok());
+        assert!(processor.finish().is_ok());
+        assert_eq!(String::from_utf8(out).unwrap_or_default(), "a\rb\r\n");
     }
 
     #[test]
