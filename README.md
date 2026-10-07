@@ -29,7 +29,7 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
   - **ANSI HalfBlocks TrueColor (Fallback universel) :** Repli déterministe en demi-blocs Unicode (`▀`, `▄`) avec couleurs 24-bit, compatible avec tous les émulateurs sous Windows (Windows Terminal, PowerShell, CMD), Linux et macOS.
   - **AsciiBox (Fallback textuel monochrome) :** Rendu textuel compact pour terminaux contraints ou logs CI/CD sans TrueColor.
 - **Double Mode d'Exécution (Dual-Mode) :**
-  - **Live Streaming Pager (Interactif TUI) :** Activé automatiquement sur un TTY interactif ou avec `--pager`. Interface plein écran basée sur [`ratatui`](https://crates.io/crates/ratatui), avec auto-scroll en direct pendant le streaming et navigation fluide au clavier (`j`/`k`, flèches, `q`).
+  - **Live Streaming Pager (Interactif TUI) :** Activé automatiquement sur un TTY interactif ou avec `--pager`. Interface plein écran basée sur [`ratatui`](https://crates.io/crates/ratatui), avec auto-scroll en direct pendant le streaming et navigation fluide au clavier (`j`/`k`, flèches, `q`). Les diagrammes y sont tracés en `AsciiBox` monochrome, seul rendu représentable par les widgets texte de `ratatui` ; utilisez `--no-pager` pour un rendu graphique Kitty, iTerm2 ou demi-blocs.
   - **Filtre Composable :** Activé automatiquement dans les pipes ou avec `--no-pager`. Agit comme un filtre `stdin -> stdout` classique, idéal pour composer avec `cat`, `grep`, `less -R` ou des redirections.
 - **Repli Gracieux (Graceful Fallback) :**
   En cas d'erreur de syntaxe Mermaid, le diagramme est affiché sous forme de bloc de texte brut formaté avec un avertissement discret, sans interrompre le flux ni faire planter l'application.
@@ -120,7 +120,7 @@ strmaid [OPTIONS] [FILE]
 | `--no-auto-orient` | *Aucun* | Désactive l'auto-orientation préventive (`LR`/`RL` $\rightarrow$ `TD`) sur terminaux étroits (< 120 cols). |
 | `--timeout-ms` | `MS` | Délai maximal d'exécution d'un rendu de diagramme en millisecondes (par défaut : `5000`, `0` pour désactiver). |
 | `--no-fallback-asciibox` | *Aucun* | Désactive le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique et restitue le code brut. |
-| `--raw-passthrough` | *Aucun* | Relaie le texte Markdown hors diagramme tel quel. Par défaut, les séquences terminales actives (OSC, DCS, APC, CSI hors couleurs) sont neutralisées et seules les couleurs SGR sont conservées. |
+| `--raw-passthrough` | *Aucun* | Mode filtre uniquement : relaie le texte Markdown hors diagramme tel quel. Par défaut, les séquences terminales actives (OSC, DCS, APC, CSI hors couleurs) sont neutralisées et seules les couleurs SGR sont conservées. |
 | `--format` | `human` \| `json` \| `ndjson` | Format de sortie des flux analysés (par défaut : `human`). |
 | `-h`, `--help` | *Aucun* | Affiche l'aide de la commande. |
 | `-V`, `--version` | *Aucun* | Affiche la version de l'application. |

@@ -1,4 +1,6 @@
-use crate::domain::{CliError, ViewportGeometry};
+use crate::domain::{
+    CliError, GraphicsProtocol, ThemeMode, ViewportGeometry, sanitize_terminal_text,
+};
 use crate::renderer::{self, RenderOptions};
 use crate::stream::{StreamItem, StreamStateMachine};
 use crossterm::{
@@ -54,18 +56,16 @@ impl PagerApp {
         }
     }
 
+    /// Ajoute un élément du flux sous forme de lignes texte sans séquence terminale,
+    /// `ratatui` n'interprétant ni les protocoles graphiques ni les SGR bruts.
     pub fn add_item(&mut self, item: StreamItem, options: RenderOptions) {
-        match item {
-            StreamItem::Text(text) => {
-                self.lines.push(text);
-            }
-            StreamItem::Diagram(diagram) => {
-                let rendered = renderer::render_diagram(&diagram, options);
-                for l in rendered.lines() {
-                    self.lines.push(l.to_string());
-                }
-            }
-        }
+        let new_lines = match item {
+            StreamItem::Text(text) => sanitized_lines(text.split('\n')),
+            StreamItem::Diagram(diagram) => sanitized_lines(
+                renderer::render_diagram(&diagram, pager_diagram_options(options)).lines(),
+            ),
+        };
+        self.lines.extend(new_lines);
         self.truncate_history(options.limits.max_pager_lines);
     }
 
@@ -121,6 +121,22 @@ impl PagerApp {
         if self.auto_scroll {
             self.scroll = self.lines.len().saturating_sub(max_visible);
         }
+    }
+}
+
+fn sanitized_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
+    lines
+        .map(|line| sanitize_terminal_text(line).into_owned())
+        .collect()
+}
+
+/// Options de rendu des diagrammes dans le pager : tracé `AsciiBox` monochrome,
+/// seul rendu représentable en `Line` ratatui.
+const fn pager_diagram_options(options: RenderOptions) -> RenderOptions {
+    RenderOptions {
+        protocol: GraphicsProtocol::AsciiBox,
+        theme: ThemeMode::Mono,
+        ..options
     }
 }
 
@@ -476,6 +492,56 @@ mod tests {
 
         assert_eq!(app.lines.len(), 3);
         assert_eq!(app.lines, vec!["line 2", "line 3", "line 4"]);
+    }
+
+    fn kitty_options() -> RenderOptions {
+        RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::Kitty,
+            ViewportGeometry::new(80, 24),
+        )
+    }
+
+    #[test]
+    fn test_pager_add_item_renders_diagram_as_plain_asciibox() {
+        let mut app = PagerApp::new();
+        let diagram =
+            crate::domain::DiagramBlock::new("flowchart TD\n  A[Alpha] --> B[Beta]".to_string());
+        app.add_item(StreamItem::Diagram(diagram), kitty_options());
+
+        let joined = app.lines.join("\n");
+        assert!(
+            !joined.contains('\x1b'),
+            "séquence ANSI résiduelle : {joined:?}"
+        );
+        assert!(joined.contains("Alpha") && joined.contains("Beta"));
+        assert!(joined.contains('─'), "tracé AsciiBox attendu : {joined:?}");
+    }
+
+    #[test]
+    fn test_pager_add_item_keeps_empty_markdown_lines() {
+        let mut app = PagerApp::new();
+        for text in ["titre", "", "suite"] {
+            app.add_item(StreamItem::Text(text.to_string()), kitty_options());
+        }
+        assert_eq!(app.lines, vec!["titre", "", "suite"]);
+    }
+
+    #[test]
+    fn test_pager_add_item_neutralizes_text_sequences() {
+        let mut app = PagerApp::new();
+        let text = "a\x1b]0;PWNED\x07b\x1b[31mc\x1b[0m".to_string();
+        app.add_item(StreamItem::Text(text), kitty_options());
+        assert_eq!(app.lines, vec!["abc"]);
+    }
+
+    #[test]
+    fn test_pager_add_item_neutralizes_invalid_diagram_fallback() {
+        let mut app = PagerApp::new();
+        let diagram = crate::domain::DiagramBlock::new("xyz \x1b]52;c;eA==\x07 $$$".to_string());
+        app.add_item(StreamItem::Diagram(diagram), kitty_options());
+        assert!(app.lines.iter().all(|line| !line.contains('\x1b')));
+        assert!(app.lines.iter().any(|line| line.contains("xyz")));
     }
 
     #[test]
