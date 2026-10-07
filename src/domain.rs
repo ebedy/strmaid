@@ -759,6 +759,8 @@ pub enum CliError {
     TerminalInit(String),
     #[error("Erreur ligne de commande: {0}")]
     CommandLine(String),
+    #[error("Polices indisponibles: {0}")]
+    FontUnavailable(String),
 }
 
 #[cfg(test)]

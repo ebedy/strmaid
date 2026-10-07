@@ -43,6 +43,8 @@ pub struct PipelineDiagnostic {
     pub rasterized: bool,
     pub raster_dimensions: Option<(u32, u32)>,
     pub error: Option<String>,
+    /// Nombre de faces de polices système disponibles pour les libellés.
+    pub font_faces: usize,
 }
 
 /// Rapport complet d'inspection émis par `strmaid doctor`.
@@ -113,6 +115,7 @@ fn pipeline_failure(err: String, svg_ok: bool) -> PipelineDiagnostic {
         rasterized: false,
         raster_dimensions: None,
         error: Some(err),
+        font_faces: rasterizer::loaded_font_count(),
     }
 }
 
@@ -123,6 +126,7 @@ fn pipeline_success(dims: (u32, u32)) -> PipelineDiagnostic {
         rasterized: true,
         raster_dimensions: Some(dims),
         error: None,
+        font_faces: rasterizer::loaded_font_count(),
     }
 }
 
@@ -206,6 +210,12 @@ fn write_human_pipeline_section<W: Write>(report: &DoctorReport, writer: &mut W)
     };
     writeln!(writer, "  • Rasterisation (resvg)       : {rast_status}")?;
 
+    let fonts_status = match report.pipeline.font_faces {
+        0 => "AUCUNE (repli AsciiBox pour les diagrammes)".to_string(),
+        count => format!("{count} faces chargées"),
+    };
+    writeln!(writer, "  • Polices système             : {fonts_status}")?;
+
     let health_badge = if report.healthy {
         "\x1b[32m✅ OPÉRATIONNEL\x1b[0m"
     } else {
@@ -249,5 +259,17 @@ mod tests {
         let json_val = parsed.unwrap_or_default();
         assert_eq!(json_val["healthy"], true);
         assert_eq!(json_val["pipeline"]["svg_generated"], true);
+        assert_eq!(
+            json_val["pipeline"]["font_faces"],
+            rasterizer::loaded_font_count()
+        );
+    }
+
+    #[test]
+    fn test_doctor_human_output_reports_font_faces() {
+        let mut buffer = Vec::new();
+        assert!(run_doctor_to_writer(OutputFormat::Human, &mut buffer).is_ok());
+        let output = String::from_utf8_lossy(&buffer);
+        assert!(output.contains("Polices système"));
     }
 }
