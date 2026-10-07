@@ -255,6 +255,21 @@ Le document JSON retourné correspond à la structure `JsonDocumentOutput` et d�
 ```
 L'agent filtre sur `valid == false` pour isoler les blocs problématiques et les corriger.
 
+Un bloc dont le contenu dépasse 1 Mio n'est ni chargé ni rendu : il apparaît comme un diagramme invalide de type `ResourceLimit`, sans `raw_content`, et le reste du document est analysé normalement :
+```json
+{
+  "type": "diagram",
+  "index": 2,
+  "valid": false,
+  "error": {
+    "message": "Diagramme Mermaid ignoré : 1377797 octets dépassent la limite de 1048576 octets",
+    "kind": "ResourceLimit"
+  },
+  "raw_content": ""
+}
+```
+**Règle pour l'agent :** un `kind == "ResourceLimit"` ne se corrige pas syntaxiquement : découper le diagramme en plusieurs blocs plus petits.
+
 ### B. Streaming continu ligne par ligne (NDJSON temps réel)
 Idéal pour les flux de documentation volumineux ou les canaux d'agents en continu, sans bufferiser tout le document en mémoire :
 ```bash
@@ -300,12 +315,16 @@ Lorsqu'un rendu matriciel haute fidélité échoue en cours de route (ex. dépas
   strmaid --no-fallback-asciibox diagram.md
   ```
 
-### E. Neutralisation des Séquences Terminales (`--raw-passthrough`)
+### E. Entrées Hostiles : Quota par Diagramme et Octets Non UTF-8
+- Un bloc Mermaid dépassant 1 Mio est drainé sans accumulation mémoire puis signalé par `⚠️  [Diagramme Mermaid ignoré : N octets dépassent la limite de 1048576 octets]` ; le texte qui suit est traité normalement (code de sortie `0`). Le mode `--block-only` refuse en revanche une entrée trop volumineuse avec le code `1`.
+- Les octets non UTF-8 sont remplacés par `U+FFFD` ; un avertissement unique est émis sur `stderr` (filtre et serveur MCP), le flux continue.
+
+### F. Neutralisation des Séquences Terminales (`--raw-passthrough`)
 - Le contenu des blocs en repli, les messages d'erreur et toutes les lignes du pager sont débarrassés des séquences de contrôle (OSC, DCS, APC, PM, SOS, CSI) et des caractères de contrôle C0/C1 hors `\n` et `\t`.
 - En mode filtre, le texte Markdown hors diagramme conserve uniquement ses couleurs SGR (`ESC [ … m`) : OSC 52 (presse-papiers), changement de titre et images Kitty injectées sont supprimés.
 - `--raw-passthrough` rétablit le relais brut du texte Markdown (mode filtre uniquement), à réserver aux sources de confiance.
 
-### F. Protocoles Graphiques Supportés (`-g`, `--graphics`)
+### G. Protocoles Graphiques Supportés (`-g`, `--graphics`)
 - `kitty` : Rendu natif GPU pixel-perfect pour Warp, Kitty, WezTerm, Ghostty.
 - `iterm2` : Protocole d'affichage d'images pour iTerm2 et terminaux compatibles macOS.
 - `halfblocks` : Repli universel demi-blocs Unicode (`▀`, `▄`) TrueColor 24-bit (compatible Windows Terminal, PowerShell, CMD, et tous terminaux Linux/macOS modernes).
@@ -322,7 +341,7 @@ strmaid --block-only --width 60 --graphics asciibox diagram.mmd
 
 - Dans le pager interactif (`--pager`), les diagrammes sont toujours tracés en `AsciiBox` monochrome, seul rendu représentable par `ratatui` ; utiliser `--no-pager` pour un rendu graphique.
 
-### G. Thèmes Visuels (`-t`, `--theme`)
+### H. Thèmes Visuels (`-t`, `--theme`)
 Sélectionner la palette adéquate selon le contexte :
 - `--theme dark` (défaut) : Contraste optimisé pour terminaux à fond sombre.
 - `--theme light` : Palette adaptée aux fonds clairs ou blancs.
@@ -383,3 +402,4 @@ L'application cible conserve toutes ses capacités TTY (raw mode, gestion des to
 - Le code de sortie de `strmaid run` est celui de la commande enfant (borné à 255) : l'interpréter comme tel pour décider d'un succès ou d'un échec.
 - Les retours chariot isolés (barres de progression) et les caractères UTF-8 multi-octets sont restitués fidèlement.
 - La sortie de l'enfant n'est pas filtrée (préservation des applications plein écran) : ne lancer via `run` que des commandes de confiance.
+- Un bloc ```` ```mermaid ```` jamais refermé ou dépassant 1 Mio n'est plus retenu indéfiniment : il est restitué tel quel (texte brut) et l'interception reprend ; la mémoire de `strmaid run` reste constante quel que soit le volume émis par l'enfant.
