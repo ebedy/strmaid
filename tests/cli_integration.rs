@@ -140,3 +140,14 @@ fn test_cli_run_intercepts_diagram() -> TestResult {
         .stdout(predicate::str::contains("```mermaid").not());
     Ok(())
 }
+
+#[test]
+#[cfg(unix)]
+fn test_cli_run_propagates_child_exit_code() -> TestResult {
+    for (script, expected_code) in [("exit 42", 42), ("exit 0", 0), ("exit 1", 1)] {
+        let mut cmd = strmaid_cmd()?;
+        cmd.arg("run").arg("--").arg("sh").arg("-c").arg(script);
+        cmd.assert().code(expected_code);
+    }
+    Ok(())
+}
