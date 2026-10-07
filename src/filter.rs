@@ -1,8 +1,10 @@
 use crate::domain::{
     CliError, DiagramBlock, JsonDocumentOutput, JsonStreamItem, JsonStreamSummary, OutputFormat,
+    sanitize_passthrough_text,
 };
 use crate::renderer::{self, RenderOptions};
 use crate::stream::{StreamItem, StreamStateMachine};
+use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
 /// Exécute le rendu direct d'un unique bloc de diagramme (`--block-only`).
@@ -150,7 +152,8 @@ fn write_human_item<W: Write>(
 ) -> Result<(), CliError> {
     match item {
         StreamItem::Text(text) => {
-            writeln!(writer, "{text}").map_err(|err| CliError::Io(err.to_string()))?;
+            let relayed = passthrough_text(text, options);
+            writeln!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
         }
         StreamItem::Diagram(diagram) => {
             let rendered = renderer::render_diagram(diagram, options);
@@ -161,6 +164,14 @@ fn write_human_item<W: Write>(
         }
     }
     Ok(())
+}
+
+/// Texte Markdown relayé : séquences actives neutralisées sauf `--raw-passthrough`.
+fn passthrough_text(text: &str, options: RenderOptions) -> Cow<'_, str> {
+    if options.raw_passthrough {
+        return Cow::Borrowed(text);
+    }
+    sanitize_passthrough_text(text)
 }
 
 fn run_ndjson_filter<R: BufRead, W: Write>(
@@ -308,6 +319,28 @@ mod tests {
         assert!(output_str.contains("# Test Header"));
         assert!(output_str.contains("Some regular markdown"));
         assert!(output_str.contains("Trailing text"));
+    }
+
+    #[test]
+    fn test_run_filter_neutralizes_active_sequences_in_text_but_keeps_sgr() {
+        let input = "\x1b[32mvert\x1b[0m \x1b]52;c;ZXZpbA==\x07\x1b]0;PWNED\x07fin\n";
+        let mut output = Vec::new();
+        let res = run_filter(Cursor::new(input), &mut output, RenderOptions::default());
+        assert!(res.is_ok());
+        assert_eq!(
+            String::from_utf8_lossy(&output),
+            "\x1b[32mvert\x1b[0m fin\n"
+        );
+    }
+
+    #[test]
+    fn test_run_filter_raw_passthrough_relays_text_verbatim() {
+        let input = "a\x1b]0;titre\x07b\n";
+        let mut output = Vec::new();
+        let options = RenderOptions::default().with_raw_passthrough(true);
+        let res = run_filter(Cursor::new(input), &mut output, options);
+        assert!(res.is_ok());
+        assert_eq!(String::from_utf8_lossy(&output), input);
     }
 
     #[test]

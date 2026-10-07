@@ -1,5 +1,6 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
@@ -290,23 +291,9 @@ fn parse_positive_width(val: &str) -> Option<u16> {
 }
 
 fn sanitize_title(val: &str) -> Option<String> {
-    let mut clean = String::with_capacity(val.len());
-    let mut chars = val.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_ansi_sequence(&mut chars);
-            continue;
-        }
-        if !ch.is_control() {
-            clean.push(ch);
-        }
-    }
+    let clean = sanitize_terminal_text(val).replace(['\n', '\t'], " ");
     let trimmed = clean.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn skip_whitespace(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -538,79 +525,170 @@ impl ViewportGeometry {
     }
 }
 
-fn skip_ansi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    match chars.peek() {
-        Some(&'[') => {
-            chars.next();
-            while let Some(&param_ch) = chars.peek() {
-                chars.next();
-                if ('@'..='~').contains(&param_ch) {
-                    break;
-                }
-            }
+/// Nature d'un segment de texte destiné au terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentKind {
+    Char(char),
+    /// Séquence CSI de style (`ESC [ … m`) aux paramètres strictement numériques.
+    Sgr,
+    /// Toute autre séquence d'échappement (CSI, OSC, DCS, APC, PM, SOS, ESC + 1 caractère).
+    OtherEscape,
+}
+
+/// Segment de texte : un caractère ou une séquence d'échappement complète.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalSegment<'a> {
+    raw: &'a str,
+    kind: SegmentKind,
+}
+
+/// Politique de filtrage des séquences d'échappement lors de l'assainissement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapePolicy {
+    StripAll,
+    KeepSgr,
+}
+
+impl EscapePolicy {
+    const fn allows(self, kind: SegmentKind) -> bool {
+        match (self, kind) {
+            (_, SegmentKind::Char(ch)) => !is_unsafe_terminal_char(ch),
+            (Self::KeepSgr, SegmentKind::Sgr) => true,
+            (Self::StripAll, SegmentKind::Sgr) | (_, SegmentKind::OtherEscape) => false,
         }
-        Some(&']') => {
-            chars.next();
-            while let Some(&osc_ch) = chars.peek() {
-                chars.next();
-                if osc_ch == '\x07' || (osc_ch == '\x1b' && chars.peek() == Some(&'\\')) {
-                    if osc_ch == '\x1b' {
-                        chars.next();
-                    }
-                    break;
-                }
-            }
-        }
-        _ => {}
     }
 }
 
-/// Supprime toutes les séquences d'échappement ANSI (CSI, OSC) d'une chaîne de caractères.
+/// Caractère de contrôle C0, DEL ou C1 interprétable par un terminal (hors `\n` et `\t`).
+const fn is_unsafe_terminal_char(ch: char) -> bool {
+    ch.is_control() && ch != '\n' && ch != '\t'
+}
+
+/// Découpe un texte en caractères et séquences d'échappement ECMA-48.
+fn terminal_segments(text: &str) -> impl Iterator<Item = TerminalSegment<'_>> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        let ch = rest.chars().next()?;
+        let (len, kind) = if ch == '\x1b' {
+            escape_sequence_len(rest)
+        } else {
+            (ch.len_utf8(), SegmentKind::Char(ch))
+        };
+        let (raw, tail) = rest.split_at(len);
+        rest = tail;
+        Some(TerminalSegment { raw, kind })
+    })
+}
+
+/// Longueur en octets de la séquence débutant par `ESC` en tête de `text`.
+fn escape_sequence_len(text: &str) -> (usize, SegmentKind) {
+    let body = &text[1..];
+    let consumed = match body.chars().next() {
+        Some('[') => return csi_sequence_len(&body[1..]),
+        Some(']' | 'P' | '_' | '^' | 'X') => 1 + string_sequence_len(&body[1..]),
+        Some(' '..='~') => 1,
+        _ => 0,
+    };
+    (1 + consumed, SegmentKind::OtherEscape)
+}
+
+/// Longueur d'une séquence CSI (`ESC [` inclus) : paramètres et intermédiaires
+/// `0x20..=0x3F`, puis octet final `0x40..=0x7E`. Une séquence malformée s'arrête
+/// au premier caractère hors grammaire, qui n'est pas consommé.
+fn csi_sequence_len(params: &str) -> (usize, SegmentKind) {
+    let (end, final_char) = params
+        .char_indices()
+        .find(|&(_, c)| !(' '..='?').contains(&c))
+        .map_or((params.len(), None), |(idx, c)| (idx, Some(c)));
+    let final_len = usize::from(final_char.is_some_and(|c| ('@'..='~').contains(&c)));
+    let is_sgr = final_char == Some('m')
+        && params[..end]
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == ';' || c == ':');
+    let kind = if is_sgr {
+        SegmentKind::Sgr
+    } else {
+        SegmentKind::OtherEscape
+    };
+    (2 + end + final_len, kind)
+}
+
+/// Longueur d'une chaîne de contrôle (OSC, DCS, APC, PM, SOS) jusqu'à son terminateur
+/// `BEL`, `ESC \` ou `ST` (U+009C) inclus. Un `ESC` isolé l'interrompt sans être consommé ;
+/// une chaîne non terminée consomme le reste du texte.
+fn string_sequence_len(content: &str) -> usize {
+    let Some((idx, terminator)) = content
+        .char_indices()
+        .find(|&(_, c)| matches!(c, '\x07' | '\x1b' | '\u{9c}'))
+    else {
+        return content.len();
+    };
+    match terminator {
+        '\x1b' if content[idx + 1..].starts_with('\\') => idx + 2,
+        '\x1b' => idx,
+        other => idx + other.len_utf8(),
+    }
+}
+
+fn sanitize_with_policy(text: &str, policy: EscapePolicy) -> Cow<'_, str> {
+    if !text.chars().any(is_unsafe_terminal_char) {
+        return Cow::Borrowed(text);
+    }
+    Cow::Owned(
+        terminal_segments(text)
+            .filter(|segment| policy.allows(segment.kind))
+            .map(|segment| segment.raw)
+            .collect(),
+    )
+}
+
+/// Neutralise toute séquence de contrôle terminal (CSI, OSC, DCS, APC, PM, SOS)
+/// et tout caractère de contrôle C0/C1 hors `\n` et `\t`.
+///
+/// À appliquer à tout contenu non fiable réémis vers le terminal (replis, erreurs).
+#[must_use]
+pub fn sanitize_terminal_text(text: &str) -> Cow<'_, str> {
+    sanitize_with_policy(text, EscapePolicy::StripAll)
+}
+
+/// Variante de [`sanitize_terminal_text`] conservant les séquences de style SGR
+/// (`ESC [ … m`), pour relayer du texte Markdown coloré sans séquence active.
+#[must_use]
+pub fn sanitize_passthrough_text(text: &str) -> Cow<'_, str> {
+    sanitize_with_policy(text, EscapePolicy::KeepSgr)
+}
+
+/// Supprime toutes les séquences d'échappement (CSI, OSC, DCS, APC, PM, SOS) d'une chaîne.
 #[must_use]
 pub fn strip_ansi(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_ansi_sequence(&mut chars);
-            continue;
-        }
-        result.push(ch);
-    }
-    result
+    terminal_segments(text)
+        .filter(|segment| matches!(segment.kind, SegmentKind::Char(_)))
+        .map(|segment| segment.raw)
+        .collect()
+}
+
+fn visible_chars(text: &str) -> impl Iterator<Item = char> + '_ {
+    terminal_segments(text).filter_map(|segment| match segment.kind {
+        SegmentKind::Char(ch) => Some(ch),
+        SegmentKind::Sgr | SegmentKind::OtherEscape => None,
+    })
 }
 
 /// Calcule la largeur d'affichage réelle en colonnes terminales en ignorant les séquences ANSI
 /// et en comptabilisant les caractères double-chasse CJK et emojis (2 colonnes).
 #[must_use]
 pub fn display_width(text: &str) -> usize {
-    let mut width = 0_usize;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_ansi_sequence(&mut chars);
-            continue;
-        }
-        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        width = width.saturating_add(char_width);
-    }
-    width
+    visible_chars(text)
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .fold(0_usize, usize::saturating_add)
 }
 
 /// Variante calculant la largeur selon la norme CJK East Asian Ambiguous.
 #[must_use]
 pub fn cjk_display_width(text: &str) -> usize {
-    let mut width = 0_usize;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_ansi_sequence(&mut chars);
-            continue;
-        }
-        let char_width = UnicodeWidthChar::width_cjk(ch).unwrap_or(0);
-        width = width.saturating_add(char_width);
-    }
-    width
+    visible_chars(text)
+        .map(|ch| UnicodeWidthChar::width_cjk(ch).unwrap_or(0))
+        .fold(0_usize, usize::saturating_add)
 }
 
 fn copy_ansi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>, result: &mut String) {
@@ -681,6 +759,8 @@ pub enum CliError {
     TerminalInit(String),
     #[error("Erreur ligne de commande: {0}")]
     CommandLine(String),
+    #[error("Polices indisponibles: {0}")]
+    FontUnavailable(String),
 }
 
 #[cfg(test)]
@@ -848,5 +928,68 @@ mod tests {
         assert_eq!(strip_ansi(styled), "Texte vert et bleu gras");
         let osc = "\x1b]1337;File=inline=1:base64\x07Texte normal";
         assert_eq!(strip_ansi(osc), "Texte normal");
+    }
+
+    #[test]
+    fn test_strip_ansi_removes_dcs_and_apc_sequences() {
+        assert_eq!(strip_ansi("a\x1bPq#0;2;0;0;0\x1b\\b"), "ab");
+        assert_eq!(strip_ansi("a\x1b_Gf=100,a=T;AAAA\x1b\\b"), "ab");
+    }
+
+    #[test]
+    fn test_sanitize_terminal_text_removes_injection_vectors() {
+        for (input, expected) in [
+            ("a\x1b]0;PWNED\x07b", "ab"),
+            ("a\x1b]0;PWNED\x1b\\b", "ab"),
+            ("a\x1b]52;c;ZXZpbA==\x07b", "ab"),
+            ("a\x1b[2Jb", "ab"),
+            ("a\x1b[31mb\x1b[0m", "ab"),
+            ("a\x1bPq#0\x1b\\b", "ab"),
+            ("a\x1b_Ga=T;AAAA\x1b\\b", "ab"),
+            ("a\x1b^privacy\x1b\\b", "ab"),
+            ("a\x1bcb", "ab"),
+            ("a\u{9b}2Jb", "a2Jb"),
+            ("a\u{9d}0;x\u{9c}b", "a0;xb"),
+            ("a\rb\x08c\x7fd", "abcd"),
+            ("a\x1b]0;non terminé", "a"),
+            ("ligne\n\tindentée", "ligne\n\tindentée"),
+        ] {
+            assert_eq!(sanitize_terminal_text(input), expected, "entrée {input:?}");
+        }
+    }
+
+    #[test]
+    fn test_sanitize_terminal_text_borrows_clean_text() {
+        let clean = "flowchart TD\n  A[café] --> B";
+        assert!(matches!(sanitize_terminal_text(clean), Cow::Borrowed(_)));
+        assert!(matches!(sanitize_passthrough_text(clean), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn test_sanitize_passthrough_text_keeps_only_sgr() {
+        let styled = "\x1b[1;32mvert\x1b[0m \x1b[38:2::255:0:0mrouge\x1b[m";
+        assert_eq!(sanitize_passthrough_text(styled), styled);
+        assert_eq!(
+            sanitize_passthrough_text("\x1b[31ma\x1b]52;c;eA==\x07\x1b[2Jb\x1b[?25lc"),
+            "\x1b[31mabc"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_passthrough_text_rejects_malformed_sgr() {
+        assert_eq!(sanitize_passthrough_text("a\x1b[31\x07mb"), "amb");
+        assert_eq!(sanitize_passthrough_text("a\x1b[>4mb"), "ab");
+    }
+
+    #[test]
+    fn test_display_width_ignores_apc_payload() {
+        assert_eq!(display_width("\x1b_Ga=T;AAAAAAAA\x1b\\ok"), 2);
+    }
+
+    #[test]
+    fn test_fence_title_strips_osc_sequence() {
+        let block =
+            DiagramBlock::from_raw("```mermaid title=\"A\x1b]0;x\x07B\"\nflowchart TD\n```");
+        assert_eq!(block.title(), Some("AB"));
     }
 }

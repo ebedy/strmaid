@@ -64,6 +64,13 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
   - *Interrogation dynamique de luminosité via OSC 11* : Rejeté pour risque de latence réseau/PTY et blocages sur `stdin` combinés.
 - **Conséquences :** Intégration visuelle fluide dans les terminaux sombres modernes, ajustable via les options `--theme` et `--width`.
 
+### 6. Neutralisation des Séquences Terminales Non Fiables
+- **Choix :** tout contenu non fiable réémis vers le terminal passe par `sanitize_terminal_text` (`src/domain.rs`), qui retire les séquences CSI, OSC, DCS, APC, PM, SOS et les contrôles C0/C1 hors `\n` et `\t`. Cela couvre le contenu et le message d'erreur d'un `GracefulFallback`, l'avertissement de repli `AsciiBox`, les erreurs `CliError` affichées et les lignes du pager. Le texte Markdown hors diagramme en `ExecutionMode::StreamFilter` passe par `sanitize_passthrough_text`, qui conserve uniquement les séquences de style SGR (`ESC [ … m`) ; `--raw-passthrough` rétablit le relais brut.
+- **Alternatives rejetées :**
+  - *Relais brut de type `cat`* : rejeté car les flux traités proviennent d'agents IA non fiables ; OSC 52 écrit le presse-papiers, OSC 0-2 réécrit le titre, APC injecte des commandes Kitty.
+  - *Filtrage limité au pager* : rejeté car le mode filtre est le chemin par défaut des pipes.
+- **Conséquences :** `strmaid run` reste transparent dans cette version : les applications plein écran relayées (vim, htop) dépendent des séquences CSI de positionnement. Sa neutralisation sélective (OSC, DCS, APC) fera l'objet d'une décision distincte.
+
 ### 5. Stratégie de Nommage `strmaid` & Feuille de Route
 - **Choix :** Nommage `strmaid` (**Str**eam / **St**reaming + Mer**maid**) pour lever la collision sur Crates.io (`termaid` déjà réservé) et refléter la mission première : streaming continu Markdown + Mermaid pour pipelines d'agents IA et développeurs.
 - **Conséquences :** Intégration de la sortie structurée `--format json` / NDJSON, protocoles de repli étendus (`AsciiBox`), prise en compte CJK/Unicode-width et mode d'intégration éditeur (`--block-only`).

@@ -29,10 +29,12 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
   - **ANSI HalfBlocks TrueColor (Fallback universel) :** Repli déterministe en demi-blocs Unicode (`▀`, `▄`) avec couleurs 24-bit, compatible avec tous les émulateurs sous Windows (Windows Terminal, PowerShell, CMD), Linux et macOS.
   - **AsciiBox (Fallback textuel monochrome) :** Rendu textuel compact pour terminaux contraints ou logs CI/CD sans TrueColor.
 - **Double Mode d'Exécution (Dual-Mode) :**
-  - **Live Streaming Pager (Interactif TUI) :** Activé automatiquement sur un TTY interactif ou avec `--pager`. Interface plein écran basée sur [`ratatui`](https://crates.io/crates/ratatui), avec auto-scroll en direct pendant le streaming et navigation fluide au clavier (`j`/`k`, flèches, `q`).
+  - **Live Streaming Pager (Interactif TUI) :** Activé automatiquement sur un TTY interactif ou avec `--pager`. Interface plein écran basée sur [`ratatui`](https://crates.io/crates/ratatui), avec auto-scroll en direct pendant le streaming et navigation fluide au clavier (`j`/`k`, flèches, `q`). Les diagrammes y sont tracés en `AsciiBox` monochrome, seul rendu représentable par les widgets texte de `ratatui` ; utilisez `--no-pager` pour un rendu graphique Kitty, iTerm2 ou demi-blocs.
   - **Filtre Composable :** Activé automatiquement dans les pipes ou avec `--no-pager`. Agit comme un filtre `stdin -> stdout` classique, idéal pour composer avec `cat`, `grep`, `less -R` ou des redirections.
 - **Repli Gracieux (Graceful Fallback) :**
   En cas d'erreur de syntaxe Mermaid, le diagramme est affiché sous forme de bloc de texte brut formaté avec un avertissement discret, sans interrompre le flux ni faire planter l'application.
+- **Neutralisation des séquences terminales :**
+  Les contenus réémis (blocs en repli, messages d'erreur, lignes du pager) sont débarrassés de toute séquence de contrôle (OSC, DCS, APC, CSI) : un flux d'agent IA ne peut pas écrire dans le presse-papiers (OSC 52), renommer la fenêtre ni injecter d'image Kitty. Le texte Markdown relayé en mode filtre conserve uniquement ses couleurs SGR (voir `--raw-passthrough`).
 - **Dimensionnement Dynamique & Thèmes :**
   Calcul proportionnel automatique selon les dimensions matricielles du terminal (`ViewportGeometry`) et gestion des thèmes visuels (`dark`, `light`, `neutral`, `amber`, `phosphor`, `neon`, `mono`).
 
@@ -42,6 +44,7 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
 
 ### Prérequis
 - Environnement Linux (Debian, Ubuntu, Arch, Fedora, etc.) ou macOS.
+- Polices système installées (ex. paquets `fonts-dejavu` ou `fonts-noto` sous Linux) pour afficher les libellés des diagrammes en rendu graphique. En leur absence (conteneur minimal, binaire musl), `strmaid` bascule automatiquement sur `AsciiBox` ; `strmaid doctor` indique le nombre de polices détectées.
 - Toolchain Rust (version 1.85+ ou édition 2024 recommandée) :
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -114,12 +117,13 @@ strmaid [OPTIONS] [FILE]
 | `-w`, `--width` | Nombre (10–1000) | Surcharge la largeur du terminal en colonnes (déclenche la compaction progressive si < 80 cols). |
 | `-p`, `--pager` | *Aucun* | Force le mode pager interactif plein écran (TUI Ratatui). |
 | `--no-pager` | *Aucun* | Désactive le pager et force le mode filtre Unix composable (`stdout`). |
-| `-g`, `--graphics` | `kitty` \| `halfblocks` \| `asciibox` \| `raw` | Force le protocole graphique. Auto-détecté par défaut selon l'environnement. |
+| `-g`, `--graphics` | `kitty` \| `iterm2` \| `halfblocks` \| `asciibox` \| `raw` | Force le protocole graphique. Auto-détecté par défaut selon l'environnement. |
 | `-t`, `--theme` | `dark` \| `light` \| `neutral` \| `amber` \| `phosphor` \| `neon` \| `mono` | Définit le thème visuel pour les diagrammes (par défaut : `dark`). |
 | `--engine` | `mermaid-svg` \| `merman` | Moteur de rendu Mermaid (`mermaid-svg` par défaut, `merman` disponible avec la feature `merman`). |
 | `--no-auto-orient` | *Aucun* | Désactive l'auto-orientation préventive (`LR`/`RL` $\rightarrow$ `TD`) sur terminaux étroits (< 120 cols). |
 | `--timeout-ms` | `MS` | Délai maximal d'exécution d'un rendu de diagramme en millisecondes (par défaut : `5000`, `0` pour désactiver). |
 | `--no-fallback-asciibox` | *Aucun* | Désactive le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique et restitue le code brut. |
+| `--raw-passthrough` | *Aucun* | Mode filtre uniquement : relaie le texte Markdown hors diagramme tel quel. Par défaut, les séquences terminales actives (OSC, DCS, APC, CSI hors couleurs) sont neutralisées et seules les couleurs SGR sont conservées. |
 | `--format` | `human` \| `json` \| `ndjson` | Format de sortie des flux analysés (par défaut : `human`). |
 | `-h`, `--help` | *Aucun* | Affiche l'aide de la commande. |
 | `-V`, `--version` | *Aucun* | Affiche la version de l'application. |
@@ -128,8 +132,8 @@ strmaid [OPTIONS] [FILE]
 
 | Sous-commande | Arguments | Description |
 | :--- | :--- | :--- |
-| `strmaid doctor` | `[--format human\|json\|ndjson]` | Diagnostique les capacités matérielles et logicielles du terminal hôte (TrueColor, PTY, SVG, resvg). |
-| `strmaid run` | `<COMMAND...>` | Exécute une commande dans un pseudo-terminal (PTY) interactif en interceptant les diagrammes Mermaid. |
+| `strmaid doctor` | `[--format human\|json\|ndjson]` | Diagnostique les capacités matérielles et logicielles du terminal hôte (TrueColor, PTY, SVG, resvg, polices système). |
+| `strmaid run` | `<COMMAND...>` | Exécute une commande dans un pseudo-terminal (PTY) interactif en interceptant les diagrammes Mermaid. Retourne le code de sortie du processus enfant (borné à 255). |
 | `strmaid mcp` | *Aucun* | Démarre le serveur Model Context Protocol (MCP) natif sur standard I/O (JSON-RPC 2.0). |
 
 ---
@@ -227,6 +231,9 @@ strmaid run agy --dangerously-skip-permissions --conversation=<hash conversation
 # Interception d'un script ou agent Python interactif :
 strmaid run python3 mon_agent.py
 ```
+Le code de sortie de la commande enfant est propagé (`strmaid run sh -c 'exit 42'` retourne `42`), les retours chariot isolés (barres de progression) sont préservés et les caractères UTF-8 multi-octets sont décodés sans corruption entre deux lectures du PTY.
+
+> **Sécurité :** `strmaid run` relaie la sortie de l'enfant sans filtrage afin de préserver les applications plein écran (vim, htop). Les séquences OSC, DCS et APC émises par la commande atteignent donc le terminal hôte ; n'exécuter via `run` que des commandes de confiance.
 
 ---
 

@@ -2,7 +2,7 @@ use crate::cache::{RenderCache, RenderCacheKey};
 use crate::domain::{
     CliError, DiagramBlock, DiagramDimensions, DiagramEngineType, DiagramErrorDetail,
     GraphicsProtocol, JsonStreamItem, OutputFormat, RasterizedImage, ResourceLimits, ThemeMode,
-    ViewportGeometry,
+    ViewportGeometry, sanitize_terminal_text,
 };
 use crate::mermaid;
 use crate::protocol::{asciibox, halfblock, iterm2, kitty};
@@ -21,6 +21,8 @@ pub struct RenderOptions {
     pub auto_orient: bool,
     pub engine: DiagramEngineType,
     pub fallback_asciibox: bool,
+    /// Relaye le texte Markdown hors diagramme sans neutraliser ses séquences terminales.
+    pub raw_passthrough: bool,
 }
 
 impl Default for RenderOptions {
@@ -45,6 +47,7 @@ impl RenderOptions {
             auto_orient: true,
             engine: DiagramEngineType::default(),
             fallback_asciibox: true,
+            raw_passthrough: false,
         }
     }
 
@@ -64,6 +67,7 @@ impl RenderOptions {
             auto_orient: true,
             engine: DiagramEngineType::MermaidSvg,
             fallback_asciibox: true,
+            raw_passthrough: false,
         }
     }
 
@@ -84,6 +88,7 @@ impl RenderOptions {
             auto_orient: true,
             engine: DiagramEngineType::MermaidSvg,
             fallback_asciibox: true,
+            raw_passthrough: false,
         }
     }
 
@@ -110,6 +115,12 @@ impl RenderOptions {
         self.fallback_asciibox = fallback_asciibox;
         self
     }
+
+    #[must_use]
+    pub const fn with_raw_passthrough(mut self, raw_passthrough: bool) -> Self {
+        self.raw_passthrough = raw_passthrough;
+        self
+    }
 }
 
 fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> RenderOptions {
@@ -122,13 +133,8 @@ fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> 
 
     RenderOptions {
         theme,
-        protocol: options.protocol,
         viewport,
-        limits: options.limits,
-        format: options.format,
-        auto_orient: options.auto_orient,
-        engine: options.engine,
-        fallback_asciibox: options.fallback_asciibox,
+        ..options
     }
 }
 
@@ -421,8 +427,10 @@ fn render_asciibox_fallback(
             let title_prefix = diagram
                 .title()
                 .map_or_else(String::new, |t| format_title_header(t, target_cols));
+            let error_text = original_err.to_string();
             let warning = format!(
-                "\x1b[33m⚠️  [Rendu graphique indisponible: {original_err}; repli automatique en mode AsciiBox]\x1b[0m\n"
+                "\x1b[33m⚠️  [Rendu graphique indisponible: {}; repli automatique en mode AsciiBox]\x1b[0m\n",
+                sanitize_terminal_text(&error_text)
             );
             (format!("{warning}{title_prefix}{text}"), true, text)
         }
@@ -543,14 +551,26 @@ fn encode_image_for_protocol(image: &RasterizedImage, options: RenderOptions) ->
 }
 
 /// Formate un bloc de repli gracieux en cas d'échec de rendu.
+///
+/// Le contenu et le message d'erreur, non fiables, sont neutralisés avant réémission.
 fn format_fallback(diagram: &DiagramBlock, err: &CliError) -> String {
     let title_prefix = diagram
         .title()
         .map_or_else(String::new, |t| format!("\x1b[1m─── {t} ───\x1b[0m\n"));
+    let error_text = err.to_string();
+    let source = sanitize_terminal_text(diagram.as_str());
+    let fence = markdown_fence_for(&source);
     format!(
-        "{title_prefix}\x1b[33m⚠️  [Rendu Mermaid indisponible: {err}]\x1b[0m\n```mermaid\n{}\n```\n",
-        diagram.as_str()
+        "{title_prefix}\x1b[33m⚠️  [Rendu Mermaid indisponible: {}]\x1b[0m\n{fence}mermaid\n{source}\n{fence}\n",
+        sanitize_terminal_text(&error_text)
     )
+}
+
+/// Clôture Markdown plus longue que toute suite de backticks du contenu (`CommonMark`),
+/// afin que le contenu réémis ne puisse pas fermer le bloc de repli.
+fn markdown_fence_for(content: &str) -> String {
+    let longest_run = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    "`".repeat(longest_run.saturating_add(1).max(3))
 }
 
 #[cfg(test)]
@@ -612,6 +632,32 @@ mod tests {
         let output = render_diagram(&block, options);
         assert!(output.contains("Rendu Mermaid indisponible"));
         assert!(output.contains("```mermaid\nxyz invalid $$$"));
+    }
+
+    #[test]
+    fn test_render_diagram_fallback_neutralizes_terminal_sequences() {
+        let block = DiagramBlock::new(
+            "xyz \x1b]0;PWNED\x07 \x1b]52;c;ZXZpbA==\x07 \x1b_Ga=T;AAAA\x1b\\ $$$".to_string(),
+        );
+        let output = render_diagram(&block, RenderOptions::default());
+        assert!(output.contains("Rendu Mermaid indisponible"));
+        assert!(!output.contains("\x1b]"), "OSC résiduel : {output:?}");
+        assert!(!output.contains("\x1b_"), "APC résiduel : {output:?}");
+        assert!(output.contains("xyz"));
+    }
+
+    #[test]
+    fn test_format_fallback_fence_outlasts_content_backticks() {
+        let block = DiagramBlock::new("A\n```\nB ````` C".to_string());
+        let output = format_fallback(&block, &CliError::MermaidSyntax("x".to_string()));
+        assert!(output.contains("\n``````mermaid\nA\n```\nB ````` C\n``````\n"));
+    }
+
+    #[test]
+    fn test_format_fallback_neutralizes_error_message() {
+        let block = DiagramBlock::new("graph".to_string());
+        let err = CliError::MermaidSyntax("label \x1b]0;PWNED\x07".to_string());
+        assert!(!format_fallback(&block, &err).contains("\x1b]"));
     }
 
     #[test]
