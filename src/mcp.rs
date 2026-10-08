@@ -18,6 +18,8 @@ const MAX_MCP_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
 const DEFAULT_RENDER_TIMEOUT_MS: u64 = 5_000;
 const MIN_RENDER_TIMEOUT_MS: u64 = 100;
 const MAX_RENDER_TIMEOUT_MS: u64 = 30_000;
+/// Révisions MCP supportées, la plus récente en premier.
+const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2025-06-18", "2024-11-05"];
 
 /// Requête standard JSON-RPC 2.0 reçue sur stdin.
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,7 +122,9 @@ pub struct ToolCallResult {
     pub content: Vec<ToolCallContent>,
     #[serde(rename = "isError")]
     pub is_error: bool,
-    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    /// Contenu structuré (MCP 2025-06-18, `structuredContent`) ; le même JSON est
+    /// aussi sérialisé dans `content` pour les clients antérieurs.
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
     pub structured: Option<Value>,
 }
 
@@ -197,7 +201,7 @@ fn handle_rpc_request(req: JsonRpcRequest) -> Option<JsonRpcResponse> {
 
 fn dispatch_method(id: Value, method: &str, params: &Value) -> JsonRpcResponse {
     match method {
-        "initialize" => handle_initialize(id),
+        "initialize" => handle_initialize(id, params),
         "ping" => make_success_response(id, json!({})),
         "tools/list" => handle_tools_list(id),
         "tools/call" => handle_tools_call(id, params),
@@ -205,10 +209,19 @@ fn dispatch_method(id: Value, method: &str, params: &Value) -> JsonRpcResponse {
     }
 }
 
-fn handle_initialize(id: Value) -> JsonRpcResponse {
+/// Négociation MCP : la version demandée si elle est supportée, sinon la plus récente.
+fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
+    SUPPORTED_PROTOCOL_VERSIONS
+        .into_iter()
+        .find(|version| Some(*version) == requested)
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
+
+fn handle_initialize(id: Value, params: &Value) -> JsonRpcResponse {
     let version = env!("CARGO_PKG_VERSION");
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
     let result = json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": negotiate_protocol_version(requested),
         "capabilities": {
             "tools": {}
         },
@@ -617,7 +630,12 @@ mod tests {
             &json!({ "source": source }),
         ));
         assert_eq!(result["isError"], false);
-        assert!(result["svg"].as_str().unwrap_or("").contains('﹠'));
+        assert!(
+            result["structuredContent"]["svg"]
+                .as_str()
+                .unwrap_or("")
+                .contains('﹠')
+        );
     }
 
     #[test]
@@ -639,7 +657,7 @@ mod tests {
             "strmaid_detect",
             &json!({ "markdown": markdown }),
         ));
-        assert_eq!(result["diagram_count"], 1);
+        assert_eq!(result["structuredContent"]["diagram_count"], 1);
     }
 
     #[test]
@@ -668,6 +686,49 @@ mod tests {
         assert!(responses.iter().all(|resp| resp.id == Value::Null));
         assert!(responses[0].result.is_some());
         assert_eq!(responses[1].error.as_ref().map(|e| e.code), Some(-32601));
+    }
+
+    fn negotiated_version(params: &Value) -> Value {
+        let request = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": params});
+        tool_result(&request.to_string())["protocolVersion"].clone()
+    }
+
+    #[test]
+    fn test_mcp_initialize_negotiates_protocol_version() {
+        assert_eq!(
+            negotiated_version(&json!({"protocolVersion": "2024-11-05"})),
+            "2024-11-05"
+        );
+        assert_eq!(
+            negotiated_version(&json!({"protocolVersion": "2025-06-18"})),
+            "2025-06-18"
+        );
+        assert_eq!(
+            negotiated_version(&json!({"protocolVersion": "1999-01-01"})),
+            "2025-06-18"
+        );
+        assert_eq!(negotiated_version(&json!({})), "2025-06-18");
+    }
+
+    #[test]
+    fn test_mcp_render_exposes_structured_content_without_root_duplicates() {
+        let call = tool_call(
+            1,
+            "strmaid_render",
+            &json!({ "source": "flowchart TD\n  A --> B" }),
+        );
+        let result = tool_result(&call);
+        assert!(result.get("svg").is_none());
+        assert!(result.get("png_base64").is_none());
+        assert!(
+            result["structuredContent"]["svg"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<svg")
+        );
+        let text = result["content"][0]["text"].as_str().unwrap_or("");
+        let from_text: Value = serde_json::from_str(text).unwrap_or(Value::Null);
+        assert_eq!(from_text, result["structuredContent"]);
     }
 
     #[test]
@@ -722,7 +783,7 @@ mod tests {
             serde_json::from_str(&out_str).unwrap_or_else(|_| unreachable!());
         let result = resp.result.unwrap_or(Value::Null);
         assert_eq!(result["isError"], false);
-        assert_eq!(result["valid"], true);
+        assert_eq!(result["structuredContent"]["valid"], true);
 
         let invalid_input = r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"strmaid_validate","arguments":{"source":"flowchart TD\n  invalid syntax @@@"}}}"#;
         let mut output2 = Vec::new();
@@ -733,8 +794,8 @@ mod tests {
         let resp2: JsonRpcResponse =
             serde_json::from_str(&out_str2).unwrap_or_else(|_| unreachable!());
         let result2 = resp2.result.unwrap_or(Value::Null);
-        assert_eq!(result2["valid"], false);
-        assert!(result2["error"]["message"].is_string());
+        assert_eq!(result2["structuredContent"]["valid"], false);
+        assert!(result2["structuredContent"]["error"]["message"].is_string());
     }
 
     #[test]
@@ -761,8 +822,11 @@ mod tests {
         let resp: JsonRpcResponse =
             serde_json::from_str(&out_str).unwrap_or_else(|_| unreachable!());
         let result = resp.result.unwrap_or(Value::Null);
-        assert_eq!(result["diagram_count"], 1);
-        assert_eq!(result["blocks"][0]["title"], "Architecture");
+        assert_eq!(result["structuredContent"]["diagram_count"], 1);
+        assert_eq!(
+            result["structuredContent"]["blocks"][0]["title"],
+            "Architecture"
+        );
     }
 
     #[test]
@@ -790,9 +854,24 @@ mod tests {
             serde_json::from_str(&out_str).unwrap_or_else(|_| unreachable!());
         let result = resp.result.unwrap_or(Value::Null);
         assert_eq!(result["isError"], false);
-        assert!(result["svg"].as_str().unwrap_or("").contains("<svg"));
-        assert_ne!(result["png_base64"].as_str().unwrap_or(""), "");
-        assert!(result["dimensions"]["width"].as_u64().unwrap_or(0) > 0);
+        assert!(
+            result["structuredContent"]["svg"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<svg")
+        );
+        assert_ne!(
+            result["structuredContent"]["png_base64"]
+                .as_str()
+                .unwrap_or(""),
+            ""
+        );
+        assert!(
+            result["structuredContent"]["dimensions"]["width"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
     }
 
     #[test]
@@ -822,7 +901,12 @@ mod tests {
             serde_json::from_str(&out_str).unwrap_or_else(|_| unreachable!());
         let result = resp.result.unwrap_or(Value::Null);
         assert_eq!(result["isError"], false);
-        assert!(result["svg"].as_str().unwrap_or("").contains("<svg"));
+        assert!(
+            result["structuredContent"]["svg"]
+                .as_str()
+                .unwrap_or("")
+                .contains("<svg")
+        );
     }
 
     #[test]

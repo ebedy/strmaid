@@ -100,7 +100,7 @@ fn test_cli_pipe_stream_filter() -> TestResult {
 
 #[test]
 fn test_cli_mcp_initialize() -> TestResult {
-    let req = r#"{"jsonrpc":"2.0","id":100,"method":"initialize","params":{}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":100,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
     let mut cmd = strmaid_cmd()?;
     cmd.arg("mcp");
     cmd.write_stdin(format!("{req}\n"));
