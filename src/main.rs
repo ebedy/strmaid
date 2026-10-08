@@ -3,10 +3,10 @@ use crossterm::terminal;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, IsTerminal};
 use std::process::ExitCode;
-use strmaid::cli::{CliArgs, Subcommands};
+use strmaid::cli::{CliArgs, Subcommands, TerminalContext};
 use strmaid::doctor;
 use strmaid::domain::{
-    CliError, ExecutionMode, OutputFormat, ResourceLimits, ViewportGeometry, sanitize_terminal_text,
+    CliError, ExecutionMode, ResourceLimits, ViewportGeometry, sanitize_terminal_text,
 };
 use strmaid::filter;
 use strmaid::mcp;
@@ -53,8 +53,18 @@ fn main() -> ExitCode {
                 "\x1b[31mErreur:\x1b[0m {}",
                 sanitize_terminal_text(&message)
             );
-            ExitCode::FAILURE
+            exit_code_for(&err)
         }
+    }
+}
+
+/// Code 2 pour une erreur d'usage de la ligne de commande (convention de `clap`),
+/// 1 pour toute autre erreur d'exécution.
+fn exit_code_for(err: &CliError) -> ExitCode {
+    if matches!(err, CliError::CommandLine(_)) {
+        ExitCode::from(2)
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -81,7 +91,10 @@ fn run_app(args: &CliArgs) -> Result<AppOutcome, CliError> {
         return execute_block_only(args, options).map(AppOutcome::from);
     }
 
-    let mode = determine_execution_mode(args);
+    let mode = args.execution_mode(TerminalContext {
+        stdin_is_tty: io::stdin().is_terminal(),
+        stdout_is_tty: io::stdout().is_terminal(),
+    })?;
     execute_stream(args, mode, options).map(AppOutcome::from)
 }
 
@@ -115,20 +128,6 @@ fn execute_stream(
         execute_with_reader(reader, mode, options)?;
     }
     Ok(true)
-}
-
-fn determine_execution_mode(args: &CliArgs) -> ExecutionMode {
-    if args.format != OutputFormat::Human {
-        ExecutionMode::StreamFilter
-    } else if args.force_pager {
-        ExecutionMode::LivePager
-    } else if args.no_pager {
-        ExecutionMode::StreamFilter
-    } else if io::stdout().is_terminal() {
-        ExecutionMode::LivePager
-    } else {
-        ExecutionMode::StreamFilter
-    }
 }
 
 fn build_render_options(args: &CliArgs) -> RenderOptions {
