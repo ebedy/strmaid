@@ -226,6 +226,10 @@ pub struct ResourceLimits {
     pub max_pager_lines: usize,
     pub max_cached_diagrams: usize,
     pub render_timeout: Option<Duration>,
+    /// Nombre maximal de rendus abandonnés après expiration de `render_timeout` et
+    /// encore en cours (les moteurs ne sont pas interruptibles) ; au-delà, tout nouveau
+    /// rendu sous garde temporelle est refusé.
+    pub max_orphan_renders: usize,
 }
 
 impl Default for ResourceLimits {
@@ -236,6 +240,7 @@ impl Default for ResourceLimits {
             max_pager_lines: 20_000,
             max_cached_diagrams: 32,
             render_timeout: Some(Duration::from_millis(5000)),
+            max_orphan_renders: 4,
         }
     }
 }

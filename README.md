@@ -248,7 +248,7 @@ Le code de sortie de la commande enfant est propagé (`strmaid run sh -c 'exit 4
 | Outil MCP | Description | Paramètres d'entrée |
 | :--- | :--- | :--- |
 | `strmaid_validate` | Valide instantanément la syntaxe Mermaid (< 10 ms) et localise l'anomalie exacte. | `source` (string, requis) |
-| `strmaid_render` | Génère le SVG vectoriel et le PNG matriciel encodé en Base64 avec dimensions exactes. | `source` (string), `theme` (optionnel), `width` (optionnel) |
+| `strmaid_render` | Génère le SVG vectoriel et le PNG matriciel encodé en Base64 avec dimensions exactes. | `source` (string), `theme`, `width`, `engine`, `timeout_ms` (optionnels) |
 | `strmaid_detect` | Scanne un document Markdown et extrait tous les diagrammes Mermaid avec leurs métadonnées. | `markdown` (string, requis) |
 
 ### Configuration pour Antigravity CLI (`agy`)
@@ -293,6 +293,12 @@ Dans les paramètres MCP (`mcp.json`) :
   }
 }
 ```
+
+### Limites de robustesse
+
+- Messages JSON-RPC limités à 2 Mio (au-delà : erreur `-32700`, le serveur continue) ; `source` limitée à 1 Mio.
+- Validation, génération SVG, rasterisation et encodage PNG s'exécutent sous un délai maximal : `timeout_ms` est borné entre 100 et 30 000 ms (défaut 5 000 ms, `0` ne désactive pas la garde).
+- Les moteurs n'étant pas interruptibles, au plus 4 rendus expirés continuent en arrière-plan ; les rendus suivants sont refusés jusqu'à leur terminaison, ce qui borne la consommation CPU du serveur.
 
 ### Test de communication stdio
 
