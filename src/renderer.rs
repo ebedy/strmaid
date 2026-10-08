@@ -9,6 +9,8 @@ use crate::protocol::{asciibox, halfblock, iterm2, kitty};
 use crate::rasterizer;
 
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 
 /// Options de configuration pour le rendu d'un bloc de diagramme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +217,7 @@ pub fn analyze_and_render_diagram(
     let effective_options = resolve_effective_options(diagram, options);
     let effective_diagram = prepare_diagram_for_rendering(diagram, effective_options);
     let render_target = effective_diagram.into_owned();
-    let timeout = effective_options.limits.render_timeout;
+    let limits = effective_options.limits;
 
     let res = run_with_render_timeout(
         move || {
@@ -226,7 +228,7 @@ pub fn analyze_and_render_diagram(
             };
             Ok(item)
         },
-        timeout,
+        &limits,
     );
 
     let mut item = match res {
@@ -371,34 +373,122 @@ fn render_svg_to_json_item(
     }
 }
 
-pub(crate) fn run_with_render_timeout<F, T>(
-    f: F,
-    timeout: Option<std::time::Duration>,
-) -> Result<T, CliError>
+/// Cycle de vie d'un rendu sous garde temporelle, partagé entre l'appelant et le
+/// thread de rendu pour décider sans course lequel des deux libère le compteur.
+const RENDER_RUNNING: u8 = 0;
+const RENDER_FINISHED: u8 = 1;
+const RENDER_ORPHANED: u8 = 2;
+
+/// Compteur des rendus orphelins : abandonnés après expiration du délai mais toujours
+/// en cours, `mermaid-svg` n'offrant aucune annulation.
+#[derive(Debug, Default)]
+pub(crate) struct RenderThreadBudget {
+    orphans: Arc<AtomicUsize>,
+}
+
+/// Garde exécutée à la fin du thread de rendu, y compris lors d'un panic du moteur :
+/// libère le compteur si l'appelant a abandonné le rendu entre-temps.
+struct RenderCompletion {
+    state: Arc<AtomicU8>,
+    orphans: Arc<AtomicUsize>,
+}
+
+impl Drop for RenderCompletion {
+    fn drop(&mut self) {
+        let finished_in_time = self
+            .state
+            .compare_exchange(
+                RENDER_RUNNING,
+                RENDER_FINISHED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok();
+        if !finished_in_time {
+            self.orphans.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl RenderThreadBudget {
+    fn orphans(&self) -> usize {
+        self.orphans.load(Ordering::SeqCst)
+    }
+
+    /// Marque le rendu comme orphelin ; le compteur est incrémenté avant la transition
+    /// afin que le thread ne puisse jamais le décrémenter en premier.
+    fn abandon(&self, state: &AtomicU8) {
+        self.orphans.fetch_add(1, Ordering::SeqCst);
+        let abandoned = state
+            .compare_exchange(
+                RENDER_RUNNING,
+                RENDER_ORPHANED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok();
+        if !abandoned {
+            self.orphans.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Exécute `f` dans un thread dédié sous la garde de `limits.render_timeout` ;
+    /// refuse immédiatement si `limits.max_orphan_renders` rendus orphelins tournent.
+    pub(crate) fn run_with_timeout<F, T>(
+        &self,
+        f: F,
+        limits: &ResourceLimits,
+    ) -> Result<T, CliError>
+    where
+        F: FnOnce() -> Result<T, CliError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let Some(timeout_dur) = limits.render_timeout else {
+            return f();
+        };
+        if self.orphans() >= limits.max_orphan_renders {
+            return Err(CliError::ResourceLimit(format!(
+                "trop de rendus abandonnés encore en cours ({} au maximum)",
+                limits.max_orphan_renders
+            )));
+        }
+
+        let state = Arc::new(AtomicU8::new(RENDER_RUNNING));
+        let completion = RenderCompletion {
+            state: Arc::clone(&state),
+            orphans: Arc::clone(&self.orphans),
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _completion = completion;
+            let _ = tx.send(f());
+        });
+
+        match rx.recv_timeout(timeout_dur) {
+            Ok(res) => res,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                self.abandon(&state);
+                Err(CliError::ResourceLimit(format!(
+                    "délai de rendu Mermaid dépassé ({} ms)",
+                    timeout_dur.as_millis()
+                )))
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CliError::ResourceLimit(
+                "interruption anormale du thread de rendu Mermaid".to_string(),
+            )),
+        }
+    }
+}
+
+static RENDER_THREADS: LazyLock<RenderThreadBudget> = LazyLock::new(RenderThreadBudget::default);
+
+/// Exécute `f` sous garde temporelle avec le budget global de rendus orphelins.
+pub(crate) fn run_with_render_timeout<F, T>(f: F, limits: &ResourceLimits) -> Result<T, CliError>
 where
     F: FnOnce() -> Result<T, CliError> + Send + 'static,
     T: Send + 'static,
 {
-    let Some(timeout_dur) = timeout else {
-        return f();
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let res = f();
-        let _ = tx.send(res);
-    });
-
-    match rx.recv_timeout(timeout_dur) {
-        Ok(res) => res,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(CliError::ResourceLimit(format!(
-            "délai de rendu Mermaid dépassé ({} ms)",
-            timeout_dur.as_millis()
-        ))),
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CliError::ResourceLimit(
-            "interruption anormale du thread de rendu Mermaid".to_string(),
-        )),
-    }
+    RENDER_THREADS.run_with_timeout(f, limits)
 }
 
 /// Rendu d'un bloc Mermaid avec rapport de validité (succès vs fallback d'erreur).
@@ -424,7 +514,7 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
     }
 
     let diag_for_render = diagram.clone();
-    let timeout = effective_options.limits.render_timeout;
+    let limits = effective_options.limits;
 
     let render_result = run_with_render_timeout(
         move || {
@@ -440,7 +530,7 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
                 ))
             }
         },
-        timeout,
+        &limits,
     );
 
     match render_result {
@@ -697,6 +787,89 @@ mod tests {
         let block = DiagramBlock::new("graph".to_string());
         let err = CliError::MermaidSyntax("label \x1b]0;PWNED\x07".to_string());
         assert!(!format_fallback(&block, &err).contains("\x1b]"));
+    }
+
+    fn budget_limits(max_orphan_renders: usize) -> ResourceLimits {
+        ResourceLimits {
+            max_orphan_renders,
+            render_timeout: Some(std::time::Duration::from_millis(10)),
+            ..ResourceLimits::default()
+        }
+    }
+
+    fn sleeping_render(millis: u64) -> impl FnOnce() -> Result<(), CliError> + Send + 'static {
+        move || {
+            std::thread::sleep(std::time::Duration::from_millis(millis));
+            Ok(())
+        }
+    }
+
+    fn wait_until_no_orphan(budget: &RenderThreadBudget) -> usize {
+        for _ in 0..200 {
+            if budget.orphans() == 0 {
+                return 0;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        budget.orphans()
+    }
+
+    #[test]
+    fn test_render_budget_caps_orphan_renders() {
+        let budget = RenderThreadBudget::default();
+        let limits = budget_limits(4);
+        let outcomes: Vec<Result<(), CliError>> = (0..20)
+            .map(|_| budget.run_with_timeout(sleeping_render(200), &limits))
+            .collect();
+
+        assert!(budget.orphans() <= 4, "orphelins : {}", budget.orphans());
+        let refused = outcomes
+            .iter()
+            .filter(|res| matches!(res, Err(CliError::ResourceLimit(msg)) if msg.contains("abandonnés")))
+            .count();
+        assert_eq!(refused, 16);
+        assert_eq!(wait_until_no_orphan(&budget), 0);
+        assert_eq!(budget.run_with_timeout(|| Ok(1), &limits), Ok(1));
+    }
+
+    #[test]
+    fn test_render_budget_does_not_count_renders_finished_in_time() {
+        let budget = RenderThreadBudget::default();
+        let limits = ResourceLimits {
+            max_orphan_renders: 1,
+            ..ResourceLimits::default()
+        };
+        for _ in 0..10 {
+            assert_eq!(budget.run_with_timeout(|| Ok(()), &limits), Ok(()));
+        }
+        assert_eq!(budget.orphans(), 0);
+    }
+
+    #[test]
+    fn test_render_budget_releases_orphan_when_render_panics() {
+        let budget = RenderThreadBudget::default();
+        let limits = budget_limits(1);
+        let res: Result<(), CliError> = budget.run_with_timeout(
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                std::panic::resume_unwind(Box::new("moteur en échec"))
+            },
+            &limits,
+        );
+        assert!(matches!(res, Err(CliError::ResourceLimit(_))));
+        assert_eq!(wait_until_no_orphan(&budget), 0);
+        assert_eq!(budget.run_with_timeout(|| Ok(7), &limits), Ok(7));
+    }
+
+    #[test]
+    fn test_render_budget_without_timeout_runs_inline() {
+        let budget = RenderThreadBudget::default();
+        let limits = ResourceLimits::default().with_render_timeout(None);
+        assert_eq!(
+            budget.run_with_timeout(|| Ok("inline"), &limits),
+            Ok("inline")
+        );
+        assert_eq!(budget.orphans(), 0);
     }
 
     #[test]

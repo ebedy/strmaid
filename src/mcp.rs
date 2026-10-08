@@ -316,7 +316,7 @@ fn render_diagram_to_mcp_payload(params: &McpRenderParams<'_>) -> Result<RenderO
                 .render_svg(&block, theme)
                 .map_err(|err| CliError::MermaidSyntax(err.message))
         },
-        timeout_dur,
+        &ResourceLimits::default().with_render_timeout(timeout_dur),
     )
     .map_err(|e| e.to_string())?;
 
