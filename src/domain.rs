@@ -618,7 +618,7 @@ enum EscapePolicy {
 }
 
 impl EscapePolicy {
-    const fn allows(self, kind: SegmentKind) -> bool {
+    fn allows(self, kind: SegmentKind) -> bool {
         match (self, kind) {
             (_, SegmentKind::Char(ch)) => !is_unsafe_terminal_char(ch),
             (Self::KeepSgr, SegmentKind::Sgr) => true,
@@ -628,7 +628,7 @@ impl EscapePolicy {
 }
 
 /// Caractère de contrôle C0, DEL ou C1 interprétable par un terminal (hors `\n` et `\t`).
-const fn is_unsafe_terminal_char(ch: char) -> bool {
+fn is_unsafe_terminal_char(ch: char) -> bool {
     ch.is_control() && ch != '\n' && ch != '\t'
 }
 
