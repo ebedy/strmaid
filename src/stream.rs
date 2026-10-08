@@ -1,5 +1,5 @@
 use crate::domain::{CliError, DiagramBlock, DiagramMetadata, ResourceLimits};
-use std::io::BufRead;
+use std::io::{self, BufRead, Read};
 use std::mem;
 
 /// Ligne d'entrée décodée en UTF-8 de manière tolérante.
@@ -16,6 +16,14 @@ pub struct LossyLine {
 pub struct LossyLines<R> {
     reader: R,
     buffer: Vec<u8>,
+    max_line_bytes: Option<usize>,
+}
+
+/// Résultat brut de la lecture d'une ligne.
+enum RawLine {
+    Eof,
+    Complete,
+    Oversized { bytes: usize, limit: usize },
 }
 
 impl<R: BufRead> LossyLines<R> {
@@ -24,7 +32,47 @@ impl<R: BufRead> LossyLines<R> {
         Self {
             reader,
             buffer: Vec::new(),
+            max_line_bytes: None,
         }
+    }
+
+    /// Variante bornée : une ligne dont le contenu dépasse `max_line_bytes` est drainée
+    /// jusqu'au `\n` suivant sans être accumulée, puis signalée par
+    /// `CliError::ResourceLimit` ; l'itération se poursuit à la ligne suivante.
+    #[must_use]
+    pub const fn with_max_line_bytes(reader: R, max_line_bytes: usize) -> Self {
+        Self {
+            reader,
+            buffer: Vec::new(),
+            max_line_bytes: Some(max_line_bytes),
+        }
+    }
+
+    fn read_raw_line(&mut self) -> io::Result<RawLine> {
+        let Some(max) = self.max_line_bytes else {
+            let read = self.reader.read_until(b'\n', &mut self.buffer)?;
+            return Ok(if read == 0 {
+                RawLine::Eof
+            } else {
+                RawLine::Complete
+            });
+        };
+        let limit = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
+        let read = (&mut self.reader)
+            .take(limit)
+            .read_until(b'\n', &mut self.buffer)?;
+        if read == 0 {
+            return Ok(RawLine::Eof);
+        }
+        if read <= max || self.buffer.last() == Some(&b'\n') {
+            return Ok(RawLine::Complete);
+        }
+        self.buffer.clear();
+        let drained = drain_until_newline(&mut self.reader)?;
+        Ok(RawLine::Oversized {
+            bytes: read.saturating_add(drained),
+            limit: max,
+        })
     }
 }
 
@@ -32,10 +80,36 @@ impl<R: BufRead> Iterator for LossyLines<R> {
     type Item = Result<LossyLine, CliError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.reader.read_until(b'\n', &mut self.buffer) {
-            Ok(0) => None,
-            Ok(_) => Some(Ok(decode_lossy_line(mem::take(&mut self.buffer)))),
+        match self.read_raw_line() {
+            Ok(RawLine::Eof) => None,
+            Ok(RawLine::Complete) => Some(Ok(decode_lossy_line(mem::take(&mut self.buffer)))),
+            Ok(RawLine::Oversized { bytes, limit }) => Some(Err(CliError::ResourceLimit(format!(
+                "ligne d'entrée de {bytes} octets supérieure à la limite de {limit} octets"
+            )))),
             Err(err) => Some(Err(CliError::Io(err.to_string()))),
+        }
+    }
+}
+
+/// Consomme le flux jusqu'au prochain `\n` inclus sans rien accumuler ; retourne
+/// le nombre d'octets écartés.
+fn drain_until_newline<R: BufRead>(reader: &mut R) -> io::Result<usize> {
+    let mut drained = 0_usize;
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(available) => available,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        if available.is_empty() {
+            return Ok(drained);
+        }
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let consumed = newline.map_or(available.len(), |pos| pos + 1);
+        reader.consume(consumed);
+        drained = drained.saturating_add(consumed);
+        if newline.is_some() {
+            return Ok(drained);
         }
     }
 }
@@ -367,6 +441,40 @@ mod tests {
                 ("suite".to_string(), false),
             ]
         );
+    }
+
+    fn collect_bounded(input: &[u8], max: usize) -> Vec<Result<String, CliError>> {
+        LossyLines::with_max_line_bytes(input, max)
+            .map(|line| line.map(|l| l.text))
+            .collect()
+    }
+
+    #[test]
+    fn test_lossy_lines_bounded_rejects_long_line_and_resumes() {
+        let input = format!("court\n{}\nsuivante\n", "x".repeat(20));
+        let lines = collect_bounded(input.as_bytes(), 10);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], Ok("court".to_string()));
+        assert!(
+            matches!(&lines[1], Err(CliError::ResourceLimit(msg)) if msg.contains("21 octets"))
+        );
+        assert_eq!(lines[2], Ok("suivante".to_string()));
+    }
+
+    #[test]
+    fn test_lossy_lines_bounded_accepts_line_at_exact_limit() {
+        let input = format!("{}\n{}", "a".repeat(10), "b".repeat(10));
+        assert_eq!(
+            collect_bounded(input.as_bytes(), 10),
+            vec![Ok("a".repeat(10)), Ok("b".repeat(10))]
+        );
+    }
+
+    #[test]
+    fn test_lossy_lines_bounded_rejects_long_last_line_without_newline() {
+        let lines = collect_bounded("y".repeat(11).as_bytes(), 10);
+        assert_eq!(lines.len(), 1);
+        assert!(matches!(&lines[0], Err(CliError::ResourceLimit(_))));
     }
 
     #[test]

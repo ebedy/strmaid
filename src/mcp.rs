@@ -1,5 +1,7 @@
-use crate::domain::{CliError, DiagramBlock, ResourceLimits, ThemeMode, strip_mermaid_fences};
-use crate::mermaid;
+use crate::domain::{
+    CliError, DiagramBlock, RasterizedImage, ResourceLimits, ThemeMode, strip_mermaid_fences,
+};
+use crate::mermaid::{self, DiagramEngine};
 use crate::rasterizer;
 use crate::renderer;
 use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
@@ -8,6 +10,14 @@ use resvg::tiny_skia::PixmapRef;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
+use std::time::Duration;
+
+/// Taille maximale d'un message JSON-RPC (une ligne) ; au-delà, le message est
+/// écarté sans être chargé et le serveur répond une erreur `-32700`.
+const MAX_MCP_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+const DEFAULT_RENDER_TIMEOUT_MS: u64 = 5_000;
+const MIN_RENDER_TIMEOUT_MS: u64 = 100;
+const MAX_RENDER_TIMEOUT_MS: u64 = 30_000;
 
 /// Requête standard JSON-RPC 2.0 reçue sur stdin.
 #[derive(Debug, Serialize, Deserialize)]
@@ -114,8 +124,17 @@ pub struct ToolCallResult {
 /// Renvoie `CliError::Io` en cas d'erreur de lecture ou d'écriture irrécupérable.
 pub fn run_mcp_server<R: BufRead, W: Write>(reader: R, mut writer: W) -> Result<(), CliError> {
     let mut utf8_reported = false;
-    for line_result in LossyLines::new(reader) {
-        let line = line_result?;
+    for line_result in LossyLines::with_max_line_bytes(reader, MAX_MCP_MESSAGE_BYTES) {
+        let line = match line_result {
+            Ok(line) => line,
+            Err(CliError::ResourceLimit(message)) => {
+                let error_resp =
+                    make_error_response(Value::Null, -32700, format!("Parse error: {message}"));
+                write_json_response(&mut writer, &error_resp)?;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
         let trimmed = line.text.trim();
         if trimmed.is_empty() {
@@ -203,7 +222,7 @@ fn handle_tools_list(id: Value) -> JsonRpcResponse {
                         "theme": { "type": "string", "description": "Thème visuel (dark, light, neutral, amber, phosphor, neon, mono - alias retro-* supportés)", "default": "dark" },
                         "width": { "type": "integer", "description": "Largeur cible en colonnes (clampée entre 20 et 1000)", "default": 80 },
                         "engine": { "type": "string", "description": "Moteur vectoriel Mermaid (mermaid-svg par défaut, merman si activé)", "default": "mermaid-svg" },
-                        "timeout_ms": { "type": "integer", "description": "Délai maximal d'exécution en millisecondes (défaut 5000, 0 pour désactiver)", "default": 5000 }
+                        "timeout_ms": { "type": "integer", "description": "Délai maximal d'exécution en millisecondes, borné entre 100 et 30000 (défaut 5000, appliqué aussi si 0)", "default": 5000 }
                     },
                     "required": ["source"]
                 }
@@ -274,84 +293,124 @@ fn call_strmaid_render(args: &Value) -> ToolCallResult {
         engine_name: args.get("engine").and_then(Value::as_str),
         timeout_ms: args.get("timeout_ms").and_then(Value::as_u64),
     };
+    let limits = request_limits(params.timeout_ms);
+    if let Some(error) = oversized_source_error(source, &limits) {
+        return error;
+    }
 
-    match render_diagram_to_mcp_payload(&params) {
-        Ok(output) => {
-            let json_str = serde_json::to_string(&output).unwrap_or_default();
-            let structured = serde_json::to_value(&output).ok();
-            ToolCallResult {
-                content: vec![ToolCallContent {
-                    content_type: "text".to_string(),
-                    text: json_str,
-                }],
-                is_error: false,
-                structured,
-            }
-        }
+    match render_diagram_to_mcp_payload(&params, &limits) {
+        Ok(output) => structured_tool_result(&output),
         Err(err) => make_tool_error(&format!("Échec de génération Mermaid: {err}")),
     }
 }
 
-fn render_diagram_to_mcp_payload(params: &McpRenderParams<'_>) -> Result<RenderOutput, String> {
-    let cleaned = strip_mermaid_fences(params.source);
-    let theme = params
-        .theme_name
-        .map_or(ThemeMode::Dark, ThemeMode::from_str_name);
-    let engine_str = params.engine_name.unwrap_or("mermaid-svg");
-    let engine = mermaid::engine_by_name(engine_str).map_err(|e| e.to_string())?;
-
-    let target_cols = u16::try_from(params.width_col.unwrap_or(80).clamp(20, 1000)).unwrap_or(80);
-    let target_width_px = u32::from(target_cols).saturating_mul(8);
-
-    let block = DiagramBlock::from_raw(&cleaned);
-    let timeout_dur = match params.timeout_ms {
-        Some(0) => None,
-        Some(ms) => Some(std::time::Duration::from_millis(ms)),
-        None => Some(std::time::Duration::from_millis(5000)),
+/// Délai effectif d'un rendu MCP : la valeur client est bornée et `0` ne peut pas
+/// désactiver la garde temporelle.
+fn effective_render_timeout(requested_ms: Option<u64>) -> Duration {
+    let millis = match requested_ms {
+        None | Some(0) => DEFAULT_RENDER_TIMEOUT_MS,
+        Some(ms) => ms.clamp(MIN_RENDER_TIMEOUT_MS, MAX_RENDER_TIMEOUT_MS),
     };
+    Duration::from_millis(millis)
+}
 
-    let svg = renderer::run_with_render_timeout(
-        move || {
-            engine
-                .render_svg(&block, theme)
-                .map_err(|err| CliError::MermaidSyntax(err.message))
-        },
-        &ResourceLimits::default().with_render_timeout(timeout_dur),
-    )
-    .map_err(|e| e.to_string())?;
+fn request_limits(timeout_ms: Option<u64>) -> ResourceLimits {
+    ResourceLimits::default().with_render_timeout(Some(effective_render_timeout(timeout_ms)))
+}
 
-    let rasterized = rasterizer::rasterize_svg(
-        &svg,
-        target_width_px,
-        ResourceLimits::default().max_raster_pixels,
-    )
-    .map_err(|e| e.to_string())?;
+fn oversized_source_error(source: &str, limits: &ResourceLimits) -> Option<ToolCallResult> {
+    (source.len() > limits.max_diagram_bytes).then(|| {
+        make_tool_error(&format!(
+            "Source Mermaid de {} octets supérieure à la limite de {} octets",
+            source.len(),
+            limits.max_diagram_bytes
+        ))
+    })
+}
 
-    let pixmap_ref = PixmapRef::from_bytes(&rasterized.rgba, rasterized.width, rasterized.height)
-        .ok_or_else(|| "Buffer RGBA invalide".to_string())?;
+/// Rendu MCP complet (SVG, rasterisation, PNG) exécuté sous une seule garde temporelle.
+struct McpRenderJob {
+    block: DiagramBlock,
+    theme: ThemeMode,
+    engine: &'static dyn DiagramEngine,
+    target_width_px: u32,
+    max_raster_pixels: u32,
+}
+
+impl McpRenderJob {
+    fn prepare(params: &McpRenderParams<'_>, limits: &ResourceLimits) -> Result<Self, CliError> {
+        let engine = mermaid::engine_by_name(params.engine_name.unwrap_or("mermaid-svg"))?;
+        let target_cols =
+            u16::try_from(params.width_col.unwrap_or(80).clamp(20, 1000)).unwrap_or(80);
+        Ok(Self {
+            block: DiagramBlock::from_raw(&strip_mermaid_fences(params.source)),
+            theme: params
+                .theme_name
+                .map_or(ThemeMode::Dark, ThemeMode::from_str_name),
+            engine,
+            target_width_px: u32::from(target_cols).saturating_mul(8),
+            max_raster_pixels: limits.max_raster_pixels,
+        })
+    }
+
+    fn run(self) -> Result<RenderOutput, CliError> {
+        let svg = self
+            .engine
+            .render_svg(&self.block, self.theme)
+            .map_err(|err| CliError::MermaidSyntax(err.message))?;
+        let rasterized =
+            rasterizer::rasterize_svg(&svg, self.target_width_px, self.max_raster_pixels)?;
+        let png_base64 = encode_png_base64(&rasterized)?;
+        Ok(RenderOutput {
+            svg,
+            png_base64,
+            dimensions: Dimensions {
+                width: rasterized.width,
+                height: rasterized.height,
+            },
+        })
+    }
+}
+
+fn encode_png_base64(image: &RasterizedImage) -> Result<String, CliError> {
+    let pixmap_ref = PixmapRef::from_bytes(&image.rgba, image.width, image.height)
+        .ok_or_else(|| CliError::ImageEncoding("Buffer RGBA invalide".to_string()))?;
     let png_bytes = pixmap_ref
         .encode_png()
-        .map_err(|e| format!("Échec encodage PNG: {e}"))?;
-    let png_base64 = BASE64_STANDARD.encode(&png_bytes);
+        .map_err(|e| CliError::ImageEncoding(format!("Échec encodage PNG: {e}")))?;
+    Ok(BASE64_STANDARD.encode(&png_bytes))
+}
 
-    Ok(RenderOutput {
-        svg,
-        png_base64,
-        dimensions: Dimensions {
-            width: rasterized.width,
-            height: rasterized.height,
-        },
-    })
+fn render_diagram_to_mcp_payload(
+    params: &McpRenderParams<'_>,
+    limits: &ResourceLimits,
+) -> Result<RenderOutput, CliError> {
+    let job = McpRenderJob::prepare(params, limits)?;
+    renderer::run_with_render_timeout(move || job.run(), limits)
 }
 
 fn call_strmaid_validate(args: &Value) -> ToolCallResult {
     let Some(source) = args.get("source").and_then(Value::as_str) else {
         return make_tool_error("Paramètre requis manquant: 'source'");
     };
+    validate_source(source, &request_limits(None))
+}
 
-    let cleaned = strip_mermaid_fences(source);
-    let block = DiagramBlock::from_raw(&cleaned);
-    let output = match mermaid::render_to_svg_detailed(&block, ThemeMode::Dark) {
+/// Valide une source sous garde temporelle ; une expiration est une erreur d'outil,
+/// pas un diagnostic syntaxique, afin de ne pas inciter l'agent à corriger un code valide.
+fn validate_source(source: &str, limits: &ResourceLimits) -> ToolCallResult {
+    if let Some(error) = oversized_source_error(source, limits) {
+        return error;
+    }
+    let block = DiagramBlock::from_raw(&strip_mermaid_fences(source));
+    match renderer::run_with_render_timeout(move || Ok(validate_block(&block)), limits) {
+        Ok(output) => structured_tool_result(&output),
+        Err(err) => make_tool_error(&format!("Validation Mermaid interrompue: {err}")),
+    }
+}
+
+fn validate_block(block: &DiagramBlock) -> ValidateOutput {
+    match mermaid::render_to_svg_detailed(block, ThemeMode::Dark) {
         Ok(_) => ValidateOutput {
             valid: true,
             error: None,
@@ -364,17 +423,17 @@ fn call_strmaid_validate(args: &Value) -> ToolCallResult {
                 kind: e.kind,
             }),
         },
-    };
+    }
+}
 
-    let json_str = serde_json::to_string(&output).unwrap_or_default();
-    let structured = serde_json::to_value(&output).ok();
+fn structured_tool_result<T: Serialize>(output: &T) -> ToolCallResult {
     ToolCallResult {
         content: vec![ToolCallContent {
             content_type: "text".to_string(),
-            text: json_str,
+            text: serde_json::to_string(output).unwrap_or_default(),
         }],
         is_error: false,
-        structured,
+        structured: serde_json::to_value(output).ok(),
     }
 }
 
@@ -383,17 +442,7 @@ fn call_strmaid_detect(args: &Value) -> ToolCallResult {
         return make_tool_error("Paramètre requis manquant: 'markdown'");
     };
 
-    let output = detect_markdown_diagrams(markdown);
-    let json_str = serde_json::to_string(&output).unwrap_or_default();
-    let structured = serde_json::to_value(&output).ok();
-    ToolCallResult {
-        content: vec![ToolCallContent {
-            content_type: "text".to_string(),
-            text: json_str,
-        }],
-        is_error: false,
-        structured,
-    }
+    structured_tool_result(&detect_markdown_diagrams(markdown))
 }
 
 fn detect_markdown_diagrams(markdown: &str) -> DetectOutput {
@@ -490,6 +539,73 @@ mod tests {
         assert!(responses[0].error.is_some());
         assert_eq!(responses[1].id, json!(7));
         assert!(responses[1].error.is_none());
+    }
+
+    fn tool_call(id: u64, name: &str, arguments: &Value) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments }
+        })
+        .to_string()
+    }
+
+    fn run_lines(input: &str) -> Vec<JsonRpcResponse> {
+        let mut output = Vec::new();
+        assert!(run_mcp_server(Cursor::new(input.to_string()), &mut output).is_ok());
+        String::from_utf8(output)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    }
+
+    #[test]
+    fn test_mcp_server_rejects_oversized_message_and_serves_next() {
+        let oversized = "x".repeat(MAX_MCP_MESSAGE_BYTES + 1);
+        let initialize = r#"{"jsonrpc":"2.0","id":9,"method":"initialize","params":{}}"#;
+        let responses = run_lines(&format!("{oversized}\n{initialize}\n"));
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0].id, Value::Null);
+        assert_eq!(responses[0].error.as_ref().map(|e| e.code), Some(-32700));
+        assert_eq!(responses[1].id, json!(9));
+        assert!(responses[1].error.is_none());
+    }
+
+    #[test]
+    fn test_mcp_render_and_validate_reject_oversized_source() {
+        let source = format!("flowchart TD\n{}", "  A --> B\n".repeat(110_000));
+        for tool in ["strmaid_render", "strmaid_validate"] {
+            let responses = run_lines(&tool_call(1, tool, &json!({ "source": source })));
+            let result = responses
+                .first()
+                .and_then(|resp| resp.result.clone())
+                .unwrap_or(Value::Null);
+            assert_eq!(result["isError"], true, "outil {tool}");
+            let text = result["content"][0]["text"].as_str().unwrap_or("");
+            assert!(text.contains("octets"), "outil {tool} : {text}");
+        }
+    }
+
+    #[test]
+    fn test_effective_render_timeout_bounds_client_value() {
+        let ms = |requested| effective_render_timeout(requested).as_millis();
+        assert_eq!(ms(None), 5000);
+        assert_eq!(ms(Some(0)), 5000);
+        assert_eq!(ms(Some(1)), 100);
+        assert_eq!(ms(Some(2000)), 2000);
+        assert_eq!(ms(Some(1_000_000_000)), 30_000);
+    }
+
+    #[test]
+    fn test_mcp_validate_reports_timeout_as_tool_error() {
+        let limits =
+            ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
+        let result = validate_source("flowchart TD\n  A --> B", &limits);
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("délai"));
     }
 
     #[test]
