@@ -225,6 +225,8 @@ pub struct ResourceLimits {
     pub max_raster_pixels: u32,
     pub max_pager_lines: usize,
     pub max_cached_diagrams: usize,
+    /// Budget en octets du cache de rendu (contenu source et payload cumulés).
+    pub max_cache_bytes: usize,
     pub render_timeout: Option<Duration>,
     /// Nombre maximal de rendus abandonnés après expiration de `render_timeout` et
     /// encore en cours (les moteurs ne sont pas interruptibles) ; au-delà, tout nouveau
@@ -239,6 +241,7 @@ impl Default for ResourceLimits {
             max_raster_pixels: 8_000_000,
             max_pager_lines: 20_000,
             max_cached_diagrams: 32,
+            max_cache_bytes: 32 * 1_048_576,
             render_timeout: Some(Duration::from_millis(5000)),
             max_orphan_renders: 4,
         }
