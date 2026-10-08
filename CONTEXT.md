@@ -81,3 +81,10 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
   - *Erreur fatale sur dépassement* : rejeté car un seul bloc hostile ou erroné faisait perdre le reste du document, contrairement à l'exigence de streaming robuste.
   - *Restitution du contenu du bloc ignoré* : rejeté car ce contenu est par construction trop volumineux pour être réémis sans réintroduire le coût mémoire évité.
 - **Conséquences :** `StreamStateMachine::process_line` ne renvoie plus d'erreur (`Option<StreamItem>`). Une ligne unique sans `\n` reste chargée en entier : la borne porte sur les blocs, pas sur la longueur d'une ligne de texte.
+
+### 8. Garde Temporelle Bornée et Limites du Serveur MCP
+- **Choix :** tout rendu sous `ResourceLimits::render_timeout` s'exécute dans un thread dédié ; à expiration, le thread devient orphelin (les moteurs `mermaid-svg` et `merman` ne sont pas interruptibles depuis `DiagramEngine`) et reste comptabilisé jusqu'à sa terminaison. Au-delà de `ResourceLimits::max_orphan_renders` (4) orphelins, tout nouveau rendu est refusé immédiatement en `GracefulFallback`. Le serveur MCP lit des messages bornés à 2 Mio, refuse les sources de plus de `max_diagram_bytes` et place validation, rendu SVG, rasterisation et encodage PNG sous une même garde dont le délai client est borné à 100–30 000 ms.
+- **Alternatives rejetées :**
+  - *Plafonner les threads actifs* : rejeté car cela limite aussi les rendus légitimes concurrents d'un consommateur de la bibliothèque ; seuls les rendus abandonnés représentent une fuite.
+  - *Journaliser chaque abandon sur stderr* : rejeté car stderr corromprait l'affichage du pager plein écran ; l'abandon reste visible dans le repli ou le résultat d'outil.
+- **Conséquences :** un rendu orphelin consomme du CPU jusqu'à sa terminaison naturelle ; l'annulation coopérative de `merman` (`OperationControl::with_deadline`) exigerait de transmettre le délai via `DiagramEngine` et reste à faire.

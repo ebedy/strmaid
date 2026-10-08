@@ -95,6 +95,8 @@ Génère le SVG vectoriel et le raster PNG encodé en Base64 avec les dimensions
   - `source` *(string, requis)* : Le code source du diagramme Mermaid.
   - `theme` *(string, optionnel)* : Thème visuel (`dark`, `light`, `neutral`, `amber`, `phosphor`, `neon`, `mono` - par défaut `dark`).
   - `width` *(integer, optionnel)* : Largeur cible en colonnes pour contraindre les dimensions (clampé automatiquement entre 20 et 1000 colonnes, défaut 80).
+  - `engine` *(string, optionnel)* : Moteur de rendu (`mermaid-svg` par défaut, `merman` si le binaire est compilé avec la feature `merman`).
+  - `timeout_ms` *(integer, optionnel)* : Délai maximal du rendu complet (SVG, rasterisation, PNG), borné entre 100 et 30 000 ms ; défaut 5 000 ms, également appliqué pour `0`.
 - **Sortie structurée :**
   ```json
   {
@@ -106,6 +108,12 @@ Génère le SVG vectoriel et le raster PNG encodé en Base64 avec les dimensions
     }
   }
   ```
+
+#### Limites du serveur MCP
+- Chaque message JSON-RPC est limité à 2 Mio : un message plus long est écarté sans être chargé et reçoit une erreur `-32700` (`id: null`) ; le message suivant est traité normalement.
+- `source` est limitée à 1 Mio pour `strmaid_validate` et `strmaid_render` : au-delà, le résultat porte `isError: true`.
+- `strmaid_validate` s'exécute sous un délai de 5 000 ms. Une expiration renvoie `isError: true` (« Validation Mermaid interrompue ») et non `valid: false` : **ne pas tenter de corriger la syntaxe dans ce cas**, simplifier ou découper le diagramme.
+- Au plus 4 rendus expirés peuvent continuer à s'exécuter en arrière-plan ; au-delà, les nouveaux rendus sont refusés immédiatement (« trop de rendus abandonnés encore en cours ») jusqu'à leur terminaison. Espacer alors les requêtes lourdes.
 
 #### C. `strmaid_detect`
 Analyse un document Markdown complet pour isoler et recenser tous les blocs de diagrammes Mermaid avec leurs métadonnées.
