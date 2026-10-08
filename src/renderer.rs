@@ -695,7 +695,11 @@ fn encode_image_for_protocol(
         GraphicsProtocol::Kitty => kitty::encode_kitty_graphics(image),
         GraphicsProtocol::Iterm2 => iterm2::encode_iterm2(image)?,
         GraphicsProtocol::HalfBlocks => halfblock::encode_halfblocks(image, target_cols),
-        GraphicsProtocol::AsciiBox => asciibox::encode_asciibox(image, target_cols),
+        GraphicsProtocol::AsciiBox => {
+            return Err(CliError::ImageEncoding(
+                "AsciiBox est un rendu textuel sans image matricielle".to_string(),
+            ));
+        }
         GraphicsProtocol::Raw => String::new(),
     })
 }
@@ -891,6 +895,20 @@ mod tests {
             Ok("inline")
         );
         assert_eq!(budget.orphans(), 0);
+    }
+
+    #[test]
+    fn test_encode_image_for_protocol_rejects_asciibox() {
+        let image = RasterizedImage::new(1, 1, vec![0, 0, 0, 255]);
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(80, 24),
+        );
+        assert!(matches!(
+            encode_image_for_protocol(&image, options),
+            Err(CliError::ImageEncoding(_))
+        ));
     }
 
     #[test]

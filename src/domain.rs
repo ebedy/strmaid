@@ -198,19 +198,6 @@ pub struct JsonDocumentOutput {
     pub summary: JsonStreamSummary,
 }
 
-impl GraphicsProtocol {
-    #[must_use]
-    pub fn from_str_name(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
-            "kitty" => Some(Self::Kitty),
-            "halfblock" | "halfblocks" => Some(Self::HalfBlocks),
-            "ascii" | "asciibox" => Some(Self::AsciiBox),
-            "raw" => Some(Self::Raw),
-            _ => None,
-        }
-    }
-}
-
 /// Mode d'exécution de l'outil CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -533,12 +520,6 @@ fn extract_mermaid_content_and_meta(input: &str) -> (String, DiagramMetadata) {
         .take_while(|line| !fence.is_closed_by(line))
         .collect();
     (content.join("\n").trim().to_string(), metadata)
-}
-
-/// Élimine les sentinelles Markdown éventuelles entourant une spécification Mermaid.
-#[must_use]
-pub fn strip_mermaid_fences(input: &str) -> String {
-    extract_mermaid_content_and_meta(input).0
 }
 
 /// Image matricielle RGBA prête pour l'affichage terminal.
@@ -969,18 +950,15 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_mermaid_fences() {
-        let raw1 = "```mermaid\ngraph TD\n  A --> B\n```";
-        assert_eq!(strip_mermaid_fences(raw1), "graph TD\n  A --> B");
-
-        let raw2 = "graph TD\n  A --> B";
-        assert_eq!(strip_mermaid_fences(raw2), "graph TD\n  A --> B");
-
-        let raw3 = "```\ngraph TD\n  A --> B\n```";
-        assert_eq!(strip_mermaid_fences(raw3), "graph TD\n  A --> B");
-
-        let block = DiagramBlock::from_raw(raw1);
-        assert_eq!(block.as_str(), "graph TD\n  A --> B");
+    fn test_diagram_block_from_raw_strips_fences() {
+        let expected = "graph TD\n  A --> B";
+        for raw in [
+            "```mermaid\ngraph TD\n  A --> B\n```",
+            "graph TD\n  A --> B",
+            "```\ngraph TD\n  A --> B\n```",
+        ] {
+            assert_eq!(DiagramBlock::from_raw(raw).as_str(), expected);
+        }
     }
 
     #[test]
