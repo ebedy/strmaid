@@ -64,6 +64,10 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
   - *Interrogation dynamique de luminosité via OSC 11* : Rejeté pour risque de latence réseau/PTY et blocages sur `stdin` combinés.
 - **Conséquences :** Intégration visuelle fluide dans les terminaux sombres modernes, ajustable via les options `--theme` et `--width`.
 
+### 5. Stratégie de Nommage `strmaid` & Feuille de Route
+- **Choix :** Nommage `strmaid` (**Str**eam / **St**reaming + Mer**maid**) pour lever la collision sur Crates.io (`termaid` déjà réservé) et refléter la mission première : streaming continu Markdown + Mermaid pour pipelines d'agents IA et développeurs.
+- **Conséquences :** Intégration de la sortie structurée `--format json` / NDJSON, protocoles de repli étendus (`AsciiBox`), prise en compte CJK/Unicode-width et mode d'intégration éditeur (`--block-only`).
+
 ### 6. Neutralisation des Séquences Terminales Non Fiables
 - **Choix :** tout contenu non fiable réémis vers le terminal passe par `sanitize_terminal_text` (`src/domain.rs`), qui retire les séquences CSI, OSC, DCS, APC, PM, SOS et les contrôles C0/C1 hors `\n` et `\t`. Cela couvre le contenu et le message d'erreur d'un `GracefulFallback`, l'avertissement de repli `AsciiBox`, les erreurs `CliError` affichées et les lignes du pager. Le texte Markdown hors diagramme en `ExecutionMode::StreamFilter` passe par `sanitize_passthrough_text`, qui conserve uniquement les séquences de style SGR (`ESC [ … m`) ; `--raw-passthrough` rétablit le relais brut.
 - **Alternatives rejetées :**
@@ -71,8 +75,9 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
   - *Filtrage limité au pager* : rejeté car le mode filtre est le chemin par défaut des pipes.
 - **Conséquences :** `strmaid run` reste transparent dans cette version : les applications plein écran relayées (vim, htop) dépendent des séquences CSI de positionnement. Sa neutralisation sélective (OSC, DCS, APC) fera l'objet d'une décision distincte.
 
-### 5. Stratégie de Nommage `strmaid` & Feuille de Route
-- **Choix :** Nommage `strmaid` (**Str**eam / **St**reaming + Mer**maid**) pour lever la collision sur Crates.io (`termaid` déjà réservé) et refléter la mission première : streaming continu Markdown + Mermaid pour pipelines d'agents IA et développeurs.
-- **Conséquences :** Intégration de la sortie structurée `--format json` / NDJSON, protocoles de repli étendus (`AsciiBox`), prise en compte CJK/Unicode-width et mode d'intégration éditeur (`--block-only`).
-
-
+### 7. Quota par Diagramme sans Interruption du Flux
+- **Choix :** un `DiagramBlock` dont le contenu dépasse `ResourceLimits::max_diagram_bytes` (1 Mio) est drainé jusqu'à sa clôture sans accumulation (`StreamStateMachine`, état `SkippingOversizedDiagram`) puis signalé par `StreamItem::OversizedDiagram`, rendu en `GracefulFallback` sans reproduction du contenu (JSON : `valid: false`, `kind: "ResourceLimit"`). Les lignes non UTF-8 sont décodées avec remplacement (`LossyLines`). `strmaid run` applique le même quota à sa capture, restitue le bloc brut en cas de dépassement et lit le PTY via un canal borné.
+- **Alternatives rejetées :**
+  - *Erreur fatale sur dépassement* : rejeté car un seul bloc hostile ou erroné faisait perdre le reste du document, contrairement à l'exigence de streaming robuste.
+  - *Restitution du contenu du bloc ignoré* : rejeté car ce contenu est par construction trop volumineux pour être réémis sans réintroduire le coût mémoire évité.
+- **Conséquences :** `StreamStateMachine::process_line` ne renvoie plus d'erreur (`Option<StreamItem>`). Une ligne unique sans `\n` reste chargée en entier : la borne porte sur les blocs, pas sur la longueur d'une ligne de texte.

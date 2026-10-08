@@ -33,6 +33,8 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
   - **Filtre Composable :** Activé automatiquement dans les pipes ou avec `--no-pager`. Agit comme un filtre `stdin -> stdout` classique, idéal pour composer avec `cat`, `grep`, `less -R` ou des redirections.
 - **Repli Gracieux (Graceful Fallback) :**
   En cas d'erreur de syntaxe Mermaid, le diagramme est affiché sous forme de bloc de texte brut formaté avec un avertissement discret, sans interrompre le flux ni faire planter l'application.
+- **Flux résilient aux entrées hostiles :**
+  Un bloc Mermaid dépassant 1 Mio est ignoré sans être chargé en mémoire : un avertissement le signale et la lecture du document se poursuit. Les octets non UTF-8 sont remplacés par `U+FFFD` (un avertissement unique sur `stderr`) au lieu d'interrompre le flux. Dans `strmaid run`, la capture d'un bloc non refermé est bornée de la même façon et la sortie de la commande enfant est lue avec contre-pression, à mémoire constante.
 - **Neutralisation des séquences terminales :**
   Les contenus réémis (blocs en repli, messages d'erreur, lignes du pager) sont débarrassés de toute séquence de contrôle (OSC, DCS, APC, CSI) : un flux d'agent IA ne peut pas écrire dans le presse-papiers (OSC 52), renommer la fenêtre ni injecter d'image Kitty. Le texte Markdown relayé en mode filtre conserve uniquement ses couleurs SGR (voir `--raw-passthrough`).
 - **Dimensionnement Dynamique & Thèmes :**

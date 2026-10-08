@@ -2,7 +2,7 @@ use crate::domain::{
     CliError, GraphicsProtocol, ThemeMode, ViewportGeometry, sanitize_terminal_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -64,6 +64,9 @@ impl PagerApp {
             StreamItem::Diagram(diagram) => sanitized_lines(
                 renderer::render_diagram(&diagram, pager_diagram_options(options)).lines(),
             ),
+            StreamItem::OversizedDiagram { skipped_bytes } => {
+                sanitized_lines(renderer::render_oversized_notice(skipped_bytes, options).lines())
+            }
         };
         self.lines.extend(new_lines);
         self.truncate_history(options.limits.max_pager_lines);
@@ -177,26 +180,20 @@ fn spawn_reader_thread<R: BufRead + Send + 'static>(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut machine = StreamStateMachine::with_limits(limits);
-        for line_result in reader.lines() {
+        for line_result in LossyLines::new(reader) {
             let line = match line_result {
-                Ok(line) => line,
-                Err(err) => {
-                    let _ = tx.send(Err(CliError::Io(err.to_string())));
-                    return;
-                }
-            };
-
-            match machine.process_line(&line) {
-                Ok(Some(item)) => {
-                    if tx.send(Ok(PagerEvent::Item(item))).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => {}
+                Ok(line) => line.text,
                 Err(err) => {
                     let _ = tx.send(Err(err));
                     return;
                 }
+            };
+
+            let Some(item) = machine.process_line(&line) else {
+                continue;
+            };
+            if tx.send(Ok(PagerEvent::Item(item))).is_err() {
+                return;
             }
         }
         if let Some(final_item) = machine.finish() {
@@ -591,15 +588,26 @@ mod tests {
     }
 
     #[test]
-    fn test_reader_thread_propagates_limit_error() {
-        let input = "```mermaid\noversized diagram\n```\n";
-        let cursor = Cursor::new(input);
+    fn test_reader_thread_tolerates_invalid_utf8() {
+        let input: &[u8] = b"avant\n\xff\napres\n";
+        let rx = spawn_reader_thread(Cursor::new(input), ResourceLimits::default());
+        let mut app = PagerApp::new();
+
+        thread::sleep(Duration::from_millis(50));
+        let res = consume_pending_items(&mut app, &rx, RenderOptions::default());
+        assert!(res.is_ok());
+        assert!(app.stream_finished);
+        assert_eq!(app.lines, vec!["avant", "\u{fffd}", "apres"]);
+    }
+
+    #[test]
+    fn test_reader_thread_skips_oversized_diagram_and_stays_open() {
+        let input = "```mermaid\noversized diagram\n```\napres\n";
         let limits = ResourceLimits {
             max_diagram_bytes: 5,
             ..ResourceLimits::default()
         };
-        let rx = spawn_reader_thread(cursor, limits);
-
+        let rx = spawn_reader_thread(Cursor::new(input), limits);
         let mut app = PagerApp::new();
         let options = RenderOptions::with_limits(
             ThemeMode::Dark,
@@ -610,7 +618,15 @@ mod tests {
 
         thread::sleep(Duration::from_millis(50));
         let res = consume_pending_items(&mut app, &rx, options);
-        assert!(matches!(res, Err(CliError::ResourceLimit(_))));
+        assert!(res.is_ok());
+        assert!(app.stream_finished);
+        assert!(
+            app.lines
+                .iter()
+                .any(|l| l.contains("Diagramme Mermaid ignoré"))
+        );
+        assert_eq!(app.lines.last().map(String::as_str), Some("apres"));
+        assert!(app.lines.iter().all(|l| !l.contains('\x1b')));
     }
 
     #[test]

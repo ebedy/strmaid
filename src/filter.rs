@@ -1,9 +1,9 @@
 use crate::domain::{
     CliError, DiagramBlock, JsonDocumentOutput, JsonStreamItem, JsonStreamSummary, OutputFormat,
-    sanitize_passthrough_text,
+    ResourceLimits, sanitize_passthrough_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
@@ -121,24 +121,33 @@ pub fn run_filter<R: BufRead, W: Write>(
     }
 }
 
+/// Parcourt le flux d'entrée ligne à ligne (UTF-8 tolérant) et transmet chaque élément
+/// produit par la machine à états, y compris celui émis à l'EOF.
+fn drive_stream<R: BufRead>(
+    reader: R,
+    limits: ResourceLimits,
+    mut on_item: impl FnMut(&StreamItem) -> Result<(), CliError>,
+) -> Result<(), CliError> {
+    let mut machine = StreamStateMachine::with_limits(limits);
+    let mut utf8_reported = false;
+    for line_result in LossyLines::new(reader) {
+        let line = line_result?;
+        utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
+        if let Some(item) = machine.process_line(&line.text) {
+            on_item(&item)?;
+        }
+    }
+    machine.finish().map_or(Ok(()), |item| on_item(&item))
+}
+
 fn run_human_filter<R: BufRead, W: Write>(
     reader: R,
     mut writer: W,
     options: RenderOptions,
 ) -> Result<(), CliError> {
-    let mut machine = StreamStateMachine::with_limits(options.limits);
-
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        if let Some(item) = machine.process_line(&line)? {
-            write_human_item(&mut writer, &item, options)?;
-        }
-    }
-
-    if let Some(item) = machine.finish() {
-        write_human_item(&mut writer, &item, options)?;
-    }
-
+    drive_stream(reader, options.limits, |item| {
+        write_human_item(&mut writer, item, options)
+    })?;
     writer
         .flush()
         .map_err(|err| CliError::Io(err.to_string()))?;
@@ -157,13 +166,19 @@ fn write_human_item<W: Write>(
         }
         StreamItem::Diagram(diagram) => {
             let rendered = renderer::render_diagram(diagram, options);
-            write!(writer, "{rendered}").map_err(|err| CliError::Io(err.to_string()))?;
-            writer
-                .flush()
-                .map_err(|err| CliError::Io(err.to_string()))?;
+            write_flushed(writer, &rendered)?;
+        }
+        StreamItem::OversizedDiagram { skipped_bytes } => {
+            let notice = renderer::render_oversized_notice(*skipped_bytes, options);
+            write_flushed(writer, &notice)?;
         }
     }
     Ok(())
+}
+
+fn write_flushed<W: Write>(writer: &mut W, rendered: &str) -> Result<(), CliError> {
+    write!(writer, "{rendered}").map_err(|err| CliError::Io(err.to_string()))?;
+    writer.flush().map_err(|err| CliError::Io(err.to_string()))
 }
 
 /// Texte Markdown relayé : séquences actives neutralisées sauf `--raw-passthrough`.
@@ -179,20 +194,10 @@ fn run_ndjson_filter<R: BufRead, W: Write>(
     mut writer: W,
     options: RenderOptions,
 ) -> Result<(), CliError> {
-    let mut machine = StreamStateMachine::with_limits(options.limits);
     let mut diagram_index = 0_usize;
-
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        if let Some(item) = machine.process_line(&line)? {
-            write_ndjson_item(&mut writer, &item, options, &mut diagram_index)?;
-        }
-    }
-
-    if let Some(item) = machine.finish() {
-        write_ndjson_item(&mut writer, &item, options, &mut diagram_index)?;
-    }
-
+    drive_stream(reader, options.limits, |item| {
+        write_ndjson_item(&mut writer, item, options, &mut diagram_index)
+    })?;
     writer
         .flush()
         .map_err(|err| CliError::Io(err.to_string()))?;
@@ -219,20 +224,12 @@ fn run_json_filter<R: BufRead, W: Write>(
     mut writer: W,
     options: RenderOptions,
 ) -> Result<(), CliError> {
-    let mut machine = StreamStateMachine::with_limits(options.limits);
     let mut diagram_index = 0_usize;
     let mut items = Vec::new();
-
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|err| CliError::Io(err.to_string()))?;
-        if let Some(item) = machine.process_line(&line)? {
-            items.push(convert_to_json_item(&item, options, &mut diagram_index));
-        }
-    }
-
-    if let Some(item) = machine.finish() {
-        items.push(convert_to_json_item(&item, options, &mut diagram_index));
-    }
+    drive_stream(reader, options.limits, |item| {
+        items.push(convert_to_json_item(item, options, &mut diagram_index));
+        Ok(())
+    })?;
 
     let doc = build_json_document(items, options);
     serde_json::to_writer_pretty(&mut writer, &doc).map_err(|err| CliError::Io(err.to_string()))?;
@@ -253,11 +250,21 @@ fn convert_to_json_item(
             content: text.clone(),
         },
         StreamItem::Diagram(diagram) => {
-            let index = *diagram_index;
-            *diagram_index = diagram_index.saturating_add(1);
-            renderer::analyze_and_render_diagram(diagram, options, index)
+            renderer::analyze_and_render_diagram(diagram, options, next_index(diagram_index))
         }
+        StreamItem::OversizedDiagram { skipped_bytes } => renderer::oversized_diagram_json_item(
+            *skipped_bytes,
+            options,
+            next_index(diagram_index),
+        ),
     }
+}
+
+/// Retourne l'index courant de diagramme puis l'incrémente.
+fn next_index(diagram_index: &mut usize) -> usize {
+    let index = *diagram_index;
+    *diagram_index = diagram_index.saturating_add(1);
+    index
 }
 
 fn build_json_document(items: Vec<JsonStreamItem>, options: RenderOptions) -> JsonDocumentOutput {
@@ -334,6 +341,18 @@ mod tests {
     }
 
     #[test]
+    fn test_run_filter_tolerates_invalid_utf8_bytes() {
+        let input: &[u8] = b"ok\n\xff\xfe\nsuite\n";
+        let mut output = Vec::new();
+        let res = run_filter(Cursor::new(input), &mut output, RenderOptions::default());
+        assert!(res.is_ok());
+        assert_eq!(
+            String::from_utf8_lossy(&output),
+            "ok\n\u{fffd}\u{fffd}\nsuite\n"
+        );
+    }
+
+    #[test]
     fn test_run_filter_raw_passthrough_relays_text_verbatim() {
         let input = "a\x1b]0;titre\x07b\n";
         let mut output = Vec::new();
@@ -343,24 +362,59 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output), input);
     }
 
+    fn small_limits_options() -> RenderOptions {
+        RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            ResourceLimits {
+                max_diagram_bytes: 4,
+                ..ResourceLimits::default()
+            },
+        )
+    }
+
     #[test]
-    fn test_run_filter_with_oversized_diagram_returns_error() {
-        let input = "```mermaid\n123456789\n```\n";
-        let reader = Cursor::new(input);
+    fn test_run_filter_skips_oversized_diagram_and_continues() {
+        let input = "avant\n```mermaid\n123456789\n```\napres\n";
         let mut output = Vec::new();
-        let limits = ResourceLimits {
-            max_diagram_bytes: 4,
-            ..ResourceLimits::default()
-        };
+
+        let res = run_filter(Cursor::new(input), &mut output, small_limits_options());
+        assert!(res.is_ok());
+        let output_str = String::from_utf8_lossy(&output);
+        assert!(output_str.contains("avant"));
+        assert!(output_str.contains("Diagramme Mermaid ignoré"));
+        assert!(output_str.contains("apres"));
+        assert!(!output_str.contains("123456789"));
+    }
+
+    #[test]
+    fn test_run_filter_json_reports_oversized_diagram_as_resource_limit() {
+        let oversized = "x".repeat(40);
+        let input = format!("```mermaid\n{oversized}\n```\n```mermaid\ngraph LR\nA-->B\n```\n");
+        let mut output = Vec::new();
         let options = RenderOptions::with_limits(
             ThemeMode::Dark,
             GraphicsProtocol::HalfBlocks,
             ViewportGeometry::new(80, 24),
-            limits,
-        );
+            ResourceLimits {
+                max_diagram_bytes: 32,
+                ..ResourceLimits::default()
+            },
+        )
+        .with_format(OutputFormat::Json);
 
-        let res = run_filter(reader, &mut output, options);
-        assert!(matches!(res, Err(CliError::ResourceLimit(_))));
+        assert!(run_filter(Cursor::new(input), &mut output, options).is_ok());
+        let doc: serde_json::Value = serde_json::from_slice(&output).unwrap_or_default();
+        let first = &doc["items"][0];
+        assert_eq!(first["type"], "diagram");
+        assert_eq!(first["index"], 0);
+        assert_eq!(first["valid"], false);
+        assert_eq!(first["error"]["kind"], "ResourceLimit");
+        assert_eq!(first["raw_content"], "");
+        assert_eq!(doc["items"][1]["index"], 1);
+        assert_eq!(doc["items"][1]["valid"], true);
+        assert_eq!(doc["summary"]["invalid_diagrams"], 1);
     }
 
     #[test]

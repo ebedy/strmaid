@@ -165,6 +165,45 @@ fn prepare_diagram_for_rendering(
     }
 }
 
+fn oversized_message(skipped_bytes: usize, limits: ResourceLimits) -> String {
+    format!(
+        "Diagramme Mermaid ignoré : {skipped_bytes} octets dépassent la limite de {} octets",
+        limits.max_diagram_bytes
+    )
+}
+
+/// Avertissement `GracefulFallback` d'un diagramme hors quota, sans reproduction du contenu.
+#[must_use]
+pub fn render_oversized_notice(skipped_bytes: usize, options: RenderOptions) -> String {
+    format!(
+        "\x1b[33m⚠️  [{}]\x1b[0m\n",
+        oversized_message(skipped_bytes, options.limits)
+    )
+}
+
+/// Élément structuré d'un diagramme hors quota (`valid: false`, `kind: ResourceLimit`).
+#[must_use]
+pub fn oversized_diagram_json_item(
+    skipped_bytes: usize,
+    options: RenderOptions,
+    index: usize,
+) -> JsonStreamItem {
+    JsonStreamItem::Diagram {
+        index,
+        valid: false,
+        title: None,
+        dimensions: None,
+        protocol: None,
+        payload: None,
+        error: Some(DiagramErrorDetail::new(
+            oversized_message(skipped_bytes, options.limits),
+            None,
+            Some("ResourceLimit".to_string()),
+        )),
+        raw_content: String::new(),
+    }
+}
+
 /// Analyse et rend un bloc Mermaid sous forme structurée pour agents IA (JSON / NDJSON).
 #[must_use]
 pub fn analyze_and_render_diagram(
