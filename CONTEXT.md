@@ -95,3 +95,10 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
   - *Indentation limitée à trois espaces (CommonMark strict)* : rejetée car, sans analyse des listes, elle cesse de reconnaître les diagrammes imbriqués dans une liste, fréquents dans les sorties de LLM. Conséquence assumée : un bloc de code indenté de quatre espaces contenant ```` ```mermaid ```` est rendu.
   - *Préfixe littéral ```` ```mermaid ```` par point d'entrée* : rejeté car quatre implémentations divergentes produisaient des résultats différents selon le mode (fermeture sur ```` ```js ````, tildes ignorés, métadonnées perdues côté MCP).
 - **Conséquences :** une table de fixtures commune (`tests/fence_fixtures.rs`) garantit l'équivalence des trois points d'entrée ; `pty::is_mermaid_fence_start` et `pty::is_fence_end` sont supprimées.
+
+### 10. Conformité MCP 2025-06-18 et Détection des Multiplexeurs
+- **Choix :** les résultats d'outils MCP exposent leur sortie dans `structuredContent`, avec le JSON sérialisé conservé dans le bloc texte comme le recommande la spécification ; `protocolVersion` est négocié (`2025-06-18`, `2024-11-05`) ; les messages sans `id` ne reçoivent aucune réponse. La détection du protocole graphique est une fonction pure (`protocol::detect_protocol_in`) qui écarte Kitty et iTerm2 sous tmux ou GNU screen. Le thème est transmis à `merman` par une directive `init` injectée après un éventuel front matter.
+- **Alternatives rejetées :**
+  - *Réduire le résultat MCP à 1,1 fois la charge utile (critère initial de la roadmap)* : rejeté car incompatible avec la recommandation de compatibilité de la spécification (JSON sérialisé dans le bloc texte).
+  - *Passthrough tmux automatique* : rejeté car il exige `allow-passthrough on` côté utilisateur et n'est pas vérifiable sans tmux graphique ; `-g kitty` reste disponible.
+- **Conséquences :** les clients lisant les champs à la racine de `result` doivent lire `structuredContent` (rupture 0.5.0).
