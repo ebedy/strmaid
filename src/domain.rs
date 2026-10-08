@@ -511,33 +511,25 @@ impl DiagramBlock {
     }
 }
 
+/// Extrait le contenu d'un bloc éventuellement entouré de fences, avec la même
+/// grammaire que le streaming : métadonnées lues sur une fence Mermaid, contenu
+/// jusqu'à la clôture correspondante. Sans fence d'ouverture, le texte est le contenu.
 fn extract_mermaid_content_and_meta(input: &str) -> (String, DiagramMetadata) {
     let trimmed = input.trim();
-    if let Some(after_fence) = trimmed.strip_prefix("```mermaid") {
-        let (first_line, rest) = after_fence
-            .split_once(['\n', '\r'])
-            .unwrap_or((after_fence, ""));
-        let meta = DiagramMetadata::parse_fenced_info(first_line);
-        let content = strip_closing_fence(rest);
-        (content, meta)
-    } else if let Some(after_fence) = trimmed.strip_prefix("```") {
-        let (_, rest) = after_fence
-            .split_once(['\n', '\r'])
-            .unwrap_or((after_fence, ""));
-        let content = strip_closing_fence(rest);
-        (content, DiagramMetadata::default())
+    let (first_line, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    let Some(fence) = CodeFence::parse_opening(first_line) else {
+        return (trimmed.to_string(), DiagramMetadata::default());
+    };
+    let metadata = if fence.is_mermaid() {
+        fence.metadata()
     } else {
-        (strip_closing_fence(trimmed), DiagramMetadata::default())
-    }
-}
-
-fn strip_closing_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(stripped) = trimmed.strip_suffix("```") {
-        stripped.trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
+        DiagramMetadata::default()
+    };
+    let content: Vec<&str> = rest
+        .lines()
+        .take_while(|line| !fence.is_closed_by(line))
+        .collect();
+    (content.join("\n").trim().to_string(), metadata)
 }
 
 /// Élimine les sentinelles Markdown éventuelles entourant une spécification Mermaid.
