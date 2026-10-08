@@ -23,7 +23,13 @@ const MAX_RENDER_TIMEOUT_MS: u64 = 30_000;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
-    #[serde(default)]
+    /// `None` si le membre est absent (notification, sans réponse) ;
+    /// `Some(Value::Null)` pour `"id": null` (requête à laquelle on répond).
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_id",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub id: Option<Value>,
     pub method: String,
     #[serde(default)]
@@ -173,14 +179,19 @@ fn write_json_response<W: Write>(
     Ok(())
 }
 
+/// Distingue un `id` présent (même `null`) d'un `id` absent, que `serde` confond
+/// avec `Option` par défaut.
+fn deserialize_present_id<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// JSON-RPC 2.0 §4.1 : une notification (message sans membre `id`) ne reçoit jamais
+/// de réponse, quelle que soit sa méthode.
 fn handle_rpc_request(req: JsonRpcRequest) -> Option<JsonRpcResponse> {
-    let id = req.id.unwrap_or(Value::Null);
-
-    // Les notifications sans id (ex: notifications/initialized) ne renvoient pas de réponse
-    if id.is_null() && req.method.starts_with("notifications/") {
-        return None;
-    }
-
+    let id = req.id?;
     Some(dispatch_method(id, &req.method, &req.params))
 }
 
@@ -629,6 +640,34 @@ mod tests {
             &json!({ "markdown": markdown }),
         ));
         assert_eq!(result["diagram_count"], 1);
+    }
+
+    #[test]
+    fn test_mcp_never_answers_notifications_without_id() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","method":"foo/bar"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","method":"tools/list"}"#,
+            "\n"
+        );
+        assert!(run_lines(input).is_empty());
+    }
+
+    #[test]
+    fn test_mcp_answers_requests_with_null_id() {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":null,"method":"initialize","params":{}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":null,"method":"foo/bar"}"#,
+            "\n"
+        );
+        let responses = run_lines(input);
+        assert_eq!(responses.len(), 2);
+        assert!(responses.iter().all(|resp| resp.id == Value::Null));
+        assert!(responses[0].result.is_some());
+        assert_eq!(responses[1].error.as_ref().map(|e| e.code), Some(-32601));
     }
 
     #[test]
