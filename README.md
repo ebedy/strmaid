@@ -49,7 +49,7 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
 ### Prérequis
 - Environnement Linux (Debian, Ubuntu, Arch, Fedora, etc.) ou macOS.
 - Polices système installées (ex. paquets `fonts-dejavu` ou `fonts-noto` sous Linux) pour afficher les libellés des diagrammes en rendu graphique. En leur absence (conteneur minimal, binaire musl), `strmaid` bascule automatiquement sur `AsciiBox` ; `strmaid doctor` indique le nombre de polices détectées.
-- Toolchain Rust (version 1.85+ ou édition 2024 recommandée) :
+- Toolchain Rust 1.95 ou plus récente (`rust-version` déclarée dans `Cargo.toml`) :
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -255,7 +255,7 @@ Le code de sortie de la commande enfant est propagé (`strmaid run sh -c 'exit 4
 
 ### Configuration pour Antigravity CLI (`agy`)
 
-Ajoutez l'entrée dans [`~/.gemini/config/mcp_config.json`](~/.gemini/config/mcp_config.json) :
+Ajoutez l'entrée dans `~/.gemini/config/mcp_config.json` :
 ```json
 {
   "mcpServers": {
@@ -342,7 +342,7 @@ Le projet applique une conception orientée domaine (DDD) stricte avec une polit
 
 ## Feuille de Route & Backlog Fonctionnel
 
-Suite au benchmark comparatif face à l'écosystème existant (`fasouto/termaid`, `meraid`, `mermaid-text`), les fonctionnalités suivantes sont intégrées à la roadmap de développement (détails dans [`.agents/features_backlog_and_market_analysis.md`](.agents/features_backlog_and_market_analysis.md)) :
+Suite au benchmark comparatif face à l'écosystème existant (`fasouto/termaid`, `meraid`, `mermaid-text`), les fonctionnalités suivantes sont intégrées à la roadmap de développement :
 
 1. **Protocole de repli textuel Unicode / ASCII (`GraphicsProtocol::AsciiBox`) :** [Livré]
    Offrir un troisième niveau de repli dégradé en caractères box-drawing Unicode ou ASCII 7-bit pour les terminaux et environnements dépourvus de Kitty et de TrueColor 24-bit (sessions SSH anciennes, logs CI/CD monochromes).

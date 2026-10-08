@@ -31,15 +31,21 @@ src/
 ├── cli.rs           # arguments Clap
 ├── domain.rs        # types domaine: DiagramBlock, GraphicsProtocol, ExecutionMode, etc.
 ├── stream.rs        # parsing streaming Markdown / DiagramBlock
-├── mermaid.rs       # generation SVG Mermaid native Rust
+├── mermaid.rs       # generation SVG Mermaid native Rust (mermaid-svg, merman)
 ├── rasterizer.rs    # SVG -> RasterizedImage
 ├── renderer.rs      # orchestration de rendu
+├── cache.rs         # cache LRU des rendus, borne en entrees et en octets
 ├── filter.rs        # ExecutionMode::StreamFilter
 ├── pager.rs         # ExecutionMode::LivePager
+├── pty.rs           # intercepteur PTY (`strmaid run`)
+├── mcp.rs           # serveur MCP JSON-RPC sur stdio (`strmaid mcp`)
+├── doctor.rs        # diagnostic du terminal (`strmaid doctor`)
 └── protocol/
     ├── mod.rs
     ├── kitty.rs
-    └── halfblock.rs
+    ├── iterm2.rs
+    ├── halfblock.rs
+    └── asciibox.rs  # rendu texte Unicode via mermaid-text
 ```
 
 Ne pas introduire une arborescence parallèle (`engine/`, `raster/`, `viewport/`, `ui/`) sans refactor explicite. Adapter les changements aux modules existants.
@@ -49,7 +55,7 @@ Ne pas introduire une arborescence parallèle (`engine/`, `raster/`, `viewport/`
 Respecter les termes de `CONTEXT.md`. Dans le code actuel, les noms effectifs à préserver sont notamment :
 
 - `DiagramBlock`
-- `GraphicsProtocol::{Kitty, HalfBlocks, Raw}`
+- `GraphicsProtocol::{Kitty, Iterm2, HalfBlocks, AsciiBox, Raw}`
 - `ExecutionMode::{StreamFilter, LivePager}`
 - `RasterizedImage`
 - `ViewportGeometry`
@@ -65,7 +71,7 @@ Si `CONTEXT.md` et le code divergent, garder la compatibilité avec le code exis
 - Génération Mermaid native via `mermaid-svg`.
 - Rasterisation via `resvg` / `usvg`.
 - TUI via `ratatui` / `crossterm`.
-- Rendu terminal via Kitty Graphics Protocol, demi-blocs ANSI TrueColor ou sortie `raw`.
+- Rendu terminal via Kitty Graphics Protocol, iTerm2 Inline Images, demi-blocs ANSI TrueColor, texte Unicode `AsciiBox` (`mermaid-text`) ou sortie `raw`.
 
 Ne pas ajouter Node.js, Puppeteer, Chromium ou un runtime JavaScript dans la boucle de rendu. Si un changement impose un moteur externe, le documenter et le justifier rigoureusement dans `CONTEXT.md` avant implémentation.
 
