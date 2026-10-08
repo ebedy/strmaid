@@ -340,22 +340,23 @@ fn render_svg_to_json_item(
 
     let target_cols = options.viewport.columns.max(10);
     let target_width_px = u32::from(target_cols) * 8;
-    match rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels) {
-        Ok(image) => {
+    let encoded = rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels)
+        .and_then(|image| {
             let dimensions = DiagramDimensions::new(image.width, image.height);
             let image = composite_on_theme_background(image, options.theme);
-            let payload = encode_image_for_protocol(&image, options);
-            JsonStreamItem::Diagram {
-                index,
-                valid: true,
-                title: diagram.title().map(ToString::to_string),
-                dimensions: Some(dimensions),
-                protocol: Some(options.protocol),
-                payload: Some(payload),
-                error: None,
-                raw_content: diagram.as_str().to_string(),
-            }
-        }
+            encode_image_for_protocol(&image, options).map(|payload| (dimensions, payload))
+        });
+    match encoded {
+        Ok((dimensions, payload)) => JsonStreamItem::Diagram {
+            index,
+            valid: true,
+            title: diagram.title().map(ToString::to_string),
+            dimensions: Some(dimensions),
+            protocol: Some(options.protocol),
+            payload: Some(payload),
+            error: None,
+            raw_content: diagram.as_str().to_string(),
+        },
         Err(err) => JsonStreamItem::Diagram {
             index,
             valid: false,
@@ -366,7 +367,7 @@ fn render_svg_to_json_item(
             error: Some(DiagramErrorDetail::new(
                 err.to_string(),
                 None,
-                Some("RasterizeError".to_string()),
+                Some(raster_error_kind(&err).to_string()),
             )),
             raw_content: diagram.as_str().to_string(),
         },
@@ -629,7 +630,7 @@ fn render_svg_to_terminal_with_raw(
 
     let image = rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels)?;
     let image = composite_on_theme_background(image, options.theme);
-    let encoded = encode_image_for_protocol(&image, options);
+    let encoded = encode_image_for_protocol(&image, options)?;
     let title_prefix = diagram
         .title()
         .map_or_else(String::new, |t| format_title_header(t, target_cols));
@@ -667,16 +668,32 @@ fn blend_channel(foreground: u8, alpha: u16, background: u8, inv_alpha: u16) -> 
     u8::try_from(blended / 255).unwrap_or(0)
 }
 
+/// Catégorie d'erreur exposée en JSON pour un échec après génération du SVG.
+const fn raster_error_kind(err: &CliError) -> &'static str {
+    if matches!(err, CliError::ImageEncoding(_)) {
+        "ImageEncodingError"
+    } else {
+        "RasterizeError"
+    }
+}
+
 /// Encode l'image matricielle selon le protocole graphique actif.
-fn encode_image_for_protocol(image: &RasterizedImage, options: RenderOptions) -> String {
+///
+/// # Errors
+/// Renvoie `CliError::ImageEncoding` si l'encodage PNG requis par iTerm2 échoue,
+/// afin de déclencher le repli au lieu d'émettre une image vide.
+fn encode_image_for_protocol(
+    image: &RasterizedImage,
+    options: RenderOptions,
+) -> Result<String, CliError> {
     let target_cols = options.viewport.columns.max(10);
-    match options.protocol {
+    Ok(match options.protocol {
         GraphicsProtocol::Kitty => kitty::encode_kitty_graphics(image),
-        GraphicsProtocol::Iterm2 => iterm2::encode_iterm2(image).unwrap_or_default(),
+        GraphicsProtocol::Iterm2 => iterm2::encode_iterm2(image)?,
         GraphicsProtocol::HalfBlocks => halfblock::encode_halfblocks(image, target_cols),
         GraphicsProtocol::AsciiBox => asciibox::encode_asciibox(image, target_cols),
         GraphicsProtocol::Raw => String::new(),
-    }
+    })
 }
 
 /// Formate un bloc de repli gracieux en cas d'échec de rendu.
@@ -870,6 +887,20 @@ mod tests {
             Ok("inline")
         );
         assert_eq!(budget.orphans(), 0);
+    }
+
+    #[test]
+    fn test_encode_image_for_protocol_reports_iterm2_failure() {
+        let truncated = RasterizedImage::new(4, 4, vec![0; 10]);
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::Iterm2,
+            ViewportGeometry::new(80, 24),
+        );
+        assert!(matches!(
+            encode_image_for_protocol(&truncated, options),
+            Err(CliError::ImageEncoding(_))
+        ));
     }
 
     #[test]
