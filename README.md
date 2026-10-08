@@ -23,7 +23,7 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
 
 - **Moteur 100% Rust Natif (Zéro dépendance JavaScript/V8) :**
   Génération et rasterisation instantanées (< 10 ms) grâce à [`mermaid-svg`](https://crates.io/crates/mermaid-svg) et [`resvg`](https://crates.io/crates/resvg). Aucun runtime V8 (`deno_core`), Node.js ou processus headless Chromium n'est requis.
-- **Protocoles Graphiques Avancés & Rendu Matriciel :**
+- **Protocoles Graphiques Avancés & Rendu Matriciel :** (sous tmux ou GNU screen, la détection automatique se replie sur les demi-blocs, Kitty et iTerm2 étant filtrés par le multiplexeur)
   - **Kitty Graphics Protocol :** Rendu haute fidélité natif pixel-perfect (supporté par Kitty, Ghostty, WezTerm).
   - **iTerm2 Inline Images Protocol :** Protocole graphique inline supporté notamment sous macOS (iTerm2, WezTerm).
   - **ANSI HalfBlocks TrueColor (Fallback universel) :** Repli déterministe en demi-blocs Unicode (`▀`, `▄`) avec couleurs 24-bit, compatible avec tous les émulateurs sous Windows (Windows Terminal, PowerShell, CMD), Linux et macOS.
@@ -123,7 +123,7 @@ strmaid [OPTIONS] [FILE]
 | `--no-pager` | *Aucun* | Désactive le pager et force le mode filtre Unix composable (`stdout`). |
 | `-g`, `--graphics` | `kitty` \| `iterm2` \| `halfblocks` \| `asciibox` \| `raw` | Force le protocole graphique. Auto-détecté par défaut selon l'environnement. |
 | `-t`, `--theme` | `dark` \| `light` \| `neutral` \| `amber` \| `phosphor` \| `neon` \| `mono` | Définit le thème visuel pour les diagrammes (par défaut : `dark`). |
-| `--engine` | `mermaid-svg` \| `merman` | Moteur de rendu Mermaid (`mermaid-svg` par défaut, `merman` disponible avec la feature `merman`). |
+| `--engine` | `mermaid-svg` \| `merman` | Moteur de rendu Mermaid (`mermaid-svg` par défaut, `merman` disponible avec la feature `merman`). Le thème `--theme` s'applique aux deux moteurs. |
 | `--no-auto-orient` | *Aucun* | Désactive l'auto-orientation préventive (`LR`/`RL` $\rightarrow$ `TD`) sur terminaux étroits (< 120 cols). |
 | `--timeout-ms` | `MS` | Délai maximal d'exécution d'un rendu de diagramme en millisecondes (par défaut : `5000`, `0` pour désactiver). |
 | `--no-fallback-asciibox` | *Aucun* | Désactive le repli automatique vers `AsciiBox` en cas d'échec du rendu graphique et restitue le code brut. |
@@ -296,6 +296,12 @@ Dans les paramètres MCP (`mcp.json`) :
 }
 ```
 
+### Conformité du protocole
+
+- Révisions supportées : `2025-06-18` (renvoyée par défaut) et `2024-11-05` (renvoyée si le client la demande).
+- Résultats d'outils : `structuredContent` contient la sortie structurée ; le même JSON figure dans `content[0].text` pour les clients antérieurs.
+- Les notifications (messages sans `id`) ne reçoivent jamais de réponse, conformément à JSON-RPC 2.0.
+
 ### Limites de robustesse
 
 - Messages JSON-RPC limités à 2 Mio (au-delà : erreur `-32700`, le serveur continue) ; `source` limitée à 1 Mio.
@@ -306,7 +312,7 @@ Dans les paramètres MCP (`mcp.json`) :
 
 Pour vérifier l'initialisation du serveur MCP depuis votre shell :
 ```bash
-printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n' | strmaid mcp
+printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}\n' | strmaid mcp
 ```
 
 ---

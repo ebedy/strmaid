@@ -64,7 +64,9 @@ Ajouter l'entrée dans le fichier de configuration des serveurs MCP (ex. `~/.gem
 
 ### Outils MCP Exposés
 
-Le serveur fournit 3 outils spécialisés :
+Le serveur fournit 3 outils spécialisés.
+
+**Format des résultats (MCP 2025-06-18) :** les « sorties structurées » décrites ci-dessous sont renvoyées dans `result.structuredContent` ; le même JSON est sérialisé dans `result.content[0].text` pour les clients antérieurs. Aucun champ n'est recopié à la racine de `result`. Le serveur négocie `protocolVersion` : il renvoie la version demandée si elle est supportée (`2025-06-18`, `2024-11-05`), sinon `2025-06-18`. Un message sans membre `id` est une notification et ne reçoit jamais de réponse.
 
 #### A. `strmaid_validate`
 Valide la syntaxe Mermaid sans coût de rendu graphique.
@@ -336,6 +338,8 @@ Lorsqu'un rendu matriciel haute fidélité échoue en cours de route (ex. dépas
 - `kitty` : Rendu natif GPU pixel-perfect pour Warp, Kitty, WezTerm, Ghostty.
 - `iterm2` : Protocole d'affichage d'images pour iTerm2 et terminaux compatibles macOS.
 - `halfblocks` : Repli universel demi-blocs Unicode (`▀`, `▄`) TrueColor 24-bit (compatible Windows Terminal, PowerShell, CMD, et tous terminaux Linux/macOS modernes).
+- Sous tmux (`TMUX`) ou GNU screen (`STY`), la détection automatique n'utilise jamais `kitty` ni `iterm2`, filtrés par le multiplexeur : elle se replie sur `halfblocks` (ou `asciibox` sans TrueColor). Forcer `-g kitty` reste possible si le passthrough tmux est configuré (`allow-passthrough on`). `strmaid doctor` affiche `TMUX` et `STY`.
+- Un échec d'encodage de l'image iTerm2 déclenche le repli `AsciiBox` au lieu d'une image vide.
 - `asciibox` : Repli sémantique en art Unicode / ASCII box-drawing pour terminaux contraints, sessions SSH anciennes ou logs CI monochromes.
 - `raw` : Sortie brute vectorielle SVG sans conversion matricielle.
 
