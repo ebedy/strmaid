@@ -1,4 +1,5 @@
 use crate::domain::{CliError, DiagramBlock, DiagramEngineType, DiagramErrorDetail, ThemeMode};
+use clap::ValueEnum;
 use mermaid_svg::Theme;
 use std::borrow::Cow;
 
@@ -206,6 +207,20 @@ pub fn engine_by_name(name: &str) -> Result<&'static dyn DiagramEngine, CliError
             if cfg!(feature = "merman") { ", 'merman'" } else { "" }
         ))),
     }
+}
+
+/// Résout un nom de moteur en `DiagramEngineType`, en vérifiant qu'il est disponible
+/// dans ce binaire (mêmes erreurs que [`engine_by_name`]).
+///
+/// # Errors
+/// Renvoie `CliError::CommandLine` si le moteur est inconnu ou non compilé.
+pub fn engine_type_by_name(name: &str) -> Result<DiagramEngineType, CliError> {
+    engine_by_name(name)?;
+    DiagramEngineType::value_variants()
+        .iter()
+        .copied()
+        .find(|engine_type| engine_type.as_str() == name)
+        .ok_or_else(|| CliError::CommandLine(format!("Moteur Mermaid inconnu '{name}'")))
 }
 
 /// Sélectionne un moteur de rendu par son type d'énumération.
