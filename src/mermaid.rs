@@ -245,11 +245,12 @@ impl DiagramEngine for MermanEngine {
     fn render_svg(
         &self,
         diagram: &DiagramBlock,
-        _theme: ThemeMode,
+        theme: ThemeMode,
     ) -> Result<String, DiagramErrorDetail> {
+        let themed_source = with_merman_theme(diagram.as_str(), theme);
         let output = merman::Renderer::new()
             .render(merman::RenderRequest::svg(
-                diagram.as_str(),
+                &themed_source,
                 merman::OperationControl::new(),
                 merman::SvgRequest::default(),
             ))
@@ -271,6 +272,45 @@ impl DiagramEngine for MermanEngine {
             )),
         }
     }
+}
+
+/// Thème Mermaid natif le plus proche de `ThemeMode`, aligné sur `map_theme` : les
+/// palettes rétro et `mono` dérivent du thème sombre.
+#[cfg(feature = "merman")]
+const fn merman_theme_name(theme: ThemeMode) -> &'static str {
+    match theme {
+        ThemeMode::Light => "default",
+        ThemeMode::Neutral => "neutral",
+        ThemeMode::Dark
+        | ThemeMode::Amber
+        | ThemeMode::Phosphor
+        | ThemeMode::Neon
+        | ThemeMode::Mono => "dark",
+    }
+}
+
+/// Injecte une directive `init` de thème, `merman` n'exposant pas d'option de thème
+/// typée. Placée après un éventuel front matter YAML (qui doit rester en tête) et
+/// avant les directives de l'utilisateur, qui gardent ainsi la priorité.
+#[cfg(feature = "merman")]
+fn with_merman_theme(source: &str, theme: ThemeMode) -> String {
+    let directive = format!(
+        "%%{{init: {{\"theme\": \"{}\"}}}}%%",
+        merman_theme_name(theme)
+    );
+    let (frontmatter, body) = split_frontmatter(source);
+    format!("{frontmatter}{directive}\n{body}")
+}
+
+/// Sépare un front matter YAML de tête (`---` … `---`) du reste de la source.
+#[cfg(feature = "merman")]
+fn split_frontmatter(source: &str) -> (&str, &str) {
+    let Some(after_opening) = source.strip_prefix("---\n") else {
+        return ("", source);
+    };
+    after_opening.find("\n---\n").map_or(("", source), |end| {
+        source.split_at("---\n".len() + end + "\n---\n".len())
+    })
 }
 
 /// Caractère Unicode de substitution sécurisé pour l'esperluette en libellé (U+FE60: Small Ampersand).
@@ -674,6 +714,58 @@ mod tests {
     fn test_engine_by_name_unknown() {
         let result = engine_by_name("unknown-engine");
         assert!(result.is_err());
+    }
+
+    #[cfg(feature = "merman")]
+    fn merman_svg(source: &str, theme: ThemeMode) -> String {
+        MermanEngine
+            .render_svg(&DiagramBlock::new(source.to_string()), theme)
+            .unwrap_or_default()
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_applies_requested_theme() {
+        let source = "graph TD\nA-->B";
+        let dark = merman_svg(source, ThemeMode::Dark);
+        let light = merman_svg(source, ThemeMode::Light);
+        assert!(dark.contains("<svg") && light.contains("<svg"));
+        assert_ne!(dark, light);
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_user_init_directive_keeps_priority() {
+        let source = "%%{init: {\"theme\": \"neutral\"}}%%\ngraph TD\nA-->B";
+        assert_eq!(
+            merman_svg(source, ThemeMode::Dark),
+            merman_svg(source, ThemeMode::Light)
+        );
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_theme_respects_frontmatter_position() {
+        let source = "---\ntitle: Titre\n---\ngraph TD\nA-->B";
+        let dark = merman_svg(source, ThemeMode::Dark);
+        assert!(dark.contains("Titre"), "front matter perdu : {dark}");
+        assert_ne!(dark, merman_svg(source, ThemeMode::Light));
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_theme_name_mapping() {
+        assert_eq!(merman_theme_name(ThemeMode::Light), "default");
+        assert_eq!(merman_theme_name(ThemeMode::Neutral), "neutral");
+        for retro in [
+            ThemeMode::Dark,
+            ThemeMode::Amber,
+            ThemeMode::Phosphor,
+            ThemeMode::Neon,
+            ThemeMode::Mono,
+        ] {
+            assert_eq!(merman_theme_name(retro), "dark");
+        }
     }
 
     #[cfg(feature = "merman")]
