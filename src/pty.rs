@@ -1,6 +1,6 @@
 use crate::domain::{CliError, CodeFence, DiagramBlock, strip_ansi};
 use crate::renderer::{self, RenderOptions};
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{self, IsTerminal, Read, Write};
 use std::thread;
 
@@ -318,6 +318,30 @@ impl<W: Write> PtyStreamProcessor<W> {
     }
 }
 
+/// Taille à appliquer au PTY lorsque le terminal hôte a changé de dimensions
+/// (colonnes, lignes) depuis la dernière synchronisation.
+fn resized_pty_size(previous: (u16, u16), current: (u16, u16)) -> Option<PtySize> {
+    (previous != current).then_some(PtySize {
+        cols: current.0,
+        rows: current.1,
+        pixel_width: 0,
+        pixel_height: 0,
+    })
+}
+
+/// Propage au PTY un redimensionnement du terminal hôte, sans gestionnaire de signal
+/// (portable Windows). Retourne la taille désormais connue de l'enfant ; en cas
+/// d'échec, l'ancienne taille est conservée pour réessayer au tour suivant.
+fn sync_pty_size(master: &dyn MasterPty, previous: (u16, u16)) -> (u16, u16) {
+    let Ok(current) = crossterm::terminal::size() else {
+        return previous;
+    };
+    match resized_pty_size(previous, current) {
+        Some(size) if master.resize(size).is_ok() => current,
+        Some(_) | None => previous,
+    }
+}
+
 /// Exécute une commande dans un pseudo-terminal (PTY) interactif.
 ///
 /// # Errors
@@ -405,7 +429,9 @@ pub fn run_pty(command: &[String], options: RenderOptions) -> Result<u32, CliErr
     let stdout = io::stdout();
     let mut processor = PtyStreamProcessor::new(stdout.lock(), options);
 
+    let mut host_size = (cols, rows);
     loop {
+        host_size = sync_pty_size(pair.master.as_ref(), host_size);
         match rx.recv_timeout(std::time::Duration::from_millis(50)) {
             Ok(bytes) => processor.process_bytes(&bytes)?,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -469,6 +495,17 @@ mod tests {
         let output = processed_output(&["~~", "~mermaid\ngraph TD\n  A --> B\n~~~\n"]);
         assert!(!output.contains("~~~mermaid"), "sortie : {output:?}");
         assert!(!output.contains("A --> B"), "sortie : {output:?}");
+    }
+
+    #[test]
+    fn test_resized_pty_size_only_on_change() {
+        assert_eq!(resized_pty_size((80, 24), (80, 24)), None);
+        let resized = resized_pty_size((80, 24), (120, 40));
+        assert_eq!(resized.map(|size| (size.cols, size.rows)), Some((120, 40)));
+        assert_eq!(
+            resized_pty_size((80, 24), (80, 30)).map(|size| size.rows),
+            Some(30)
+        );
     }
 
     #[test]

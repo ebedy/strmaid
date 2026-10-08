@@ -1,4 +1,6 @@
-use crate::domain::{CliError, DiagramEngineType, GraphicsProtocol, OutputFormat, ThemeMode};
+use crate::domain::{
+    CliError, DiagramEngineType, ExecutionMode, GraphicsProtocol, OutputFormat, ThemeMode,
+};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -86,6 +88,14 @@ pub struct CliArgs {
     pub raw_passthrough: bool,
 }
 
+/// Rattachement des flux standards à un terminal, injecté pour rendre la sélection
+/// du mode d'exécution testable sans TTY.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalContext {
+    pub stdin_is_tty: bool,
+    pub stdout_is_tty: bool,
+}
+
 /// Sous-commandes disponibles pour `strmaid`.
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Subcommands {
@@ -131,6 +141,34 @@ impl CliArgs {
             ));
         }
         Ok(())
+    }
+
+    /// Détermine le mode d'exécution effectif.
+    ///
+    /// # Errors
+    /// Renvoie `CliError::CommandLine` si le pager devait s'ouvrir sans fichier alors
+    /// que stdin est un terminal : le lecteur de flux et la boucle d'événements se
+    /// disputeraient alors les frappes du même TTY.
+    pub fn execution_mode(&self, terminal: TerminalContext) -> Result<ExecutionMode, CliError> {
+        let mode = self.preferred_mode(terminal.stdout_is_tty);
+        let lacks_input = self.file.is_none() && terminal.stdin_is_tty;
+        if mode == ExecutionMode::LivePager && lacks_input {
+            return Err(CliError::CommandLine(
+                "aucune entrée : fournir un fichier Markdown ou un flux via un pipe (ex. cat doc.md | strmaid)"
+                    .to_string(),
+            ));
+        }
+        Ok(mode)
+    }
+
+    const fn preferred_mode(&self, stdout_is_tty: bool) -> ExecutionMode {
+        if !matches!(self.format, OutputFormat::Human) || self.no_pager {
+            return ExecutionMode::StreamFilter;
+        }
+        if self.force_pager || stdout_is_tty {
+            return ExecutionMode::LivePager;
+        }
+        ExecutionMode::StreamFilter
     }
 }
 
@@ -288,6 +326,62 @@ mod tests {
     fn test_cli_parse_accepts_width_bounds() {
         for width in ["10", "1000"] {
             assert!(CliArgs::try_parse_from(["strmaid", "--width", width]).is_ok());
+        }
+    }
+
+    fn mode_for(
+        argv: &[&str],
+        stdin_is_tty: bool,
+        stdout_is_tty: bool,
+    ) -> Result<ExecutionMode, CliError> {
+        let parsed = CliArgs::try_parse_from(argv).unwrap_or_else(|_| unreachable!());
+        parsed.execution_mode(TerminalContext {
+            stdin_is_tty,
+            stdout_is_tty,
+        })
+    }
+
+    #[test]
+    fn test_execution_mode_refuses_pager_without_input_on_tty() {
+        for argv in [&["strmaid"][..], &["strmaid", "--pager"][..]] {
+            assert!(matches!(
+                mode_for(argv, true, true),
+                Err(CliError::CommandLine(msg)) if msg.contains("aucune entrée")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_execution_mode_selection_matrix() {
+        let cases: [(&[&str], bool, bool, ExecutionMode); 6] = [
+            (&["strmaid", "doc.md"], true, true, ExecutionMode::LivePager),
+            (&["strmaid"], false, true, ExecutionMode::LivePager),
+            (&["strmaid"], false, false, ExecutionMode::StreamFilter),
+            (
+                &["strmaid", "--no-pager"],
+                true,
+                true,
+                ExecutionMode::StreamFilter,
+            ),
+            (
+                &["strmaid", "--format", "json"],
+                true,
+                true,
+                ExecutionMode::StreamFilter,
+            ),
+            (
+                &["strmaid", "--pager", "doc.md"],
+                true,
+                false,
+                ExecutionMode::LivePager,
+            ),
+        ];
+        for (argv, stdin_is_tty, stdout_is_tty, expected) in cases {
+            assert_eq!(
+                mode_for(argv, stdin_is_tty, stdout_is_tty),
+                Ok(expected),
+                "{argv:?} stdin_tty={stdin_is_tty} stdout_tty={stdout_is_tty}"
+            );
         }
     }
 

@@ -348,6 +348,7 @@ strmaid --block-only --width 60 --graphics asciibox diagram.mmd
 ```
 
 - Dans le pager interactif (`--pager`), les diagrammes sont toujours tracés en `AsciiBox` monochrome, seul rendu représentable par `ratatui` ; utiliser `--no-pager` pour un rendu graphique.
+- `strmaid` sans fichier alors que stdin est un terminal refuse d'ouvrir le pager (code `2`, « aucune entrée ») : un agent doit toujours fournir un fichier ou un flux (`cat doc.md | strmaid --no-pager`). Les erreurs d'usage de la ligne de commande retournent le code `2`, les autres erreurs le code `1`.
 
 ### H. Thèmes Visuels (`-t`, `--theme`)
 Sélectionner la palette adéquate selon le contexte :
@@ -413,6 +414,7 @@ L'application cible conserve toutes ses capacités TTY (raw mode, gestion des to
 
 **Règles pour l'agent :**
 - Le code de sortie de `strmaid run` est celui de la commande enfant (borné à 255) : l'interpréter comme tel pour décider d'un succès ou d'un échec.
+- Les redimensionnements du terminal hôte sont transmis à la commande enfant.
 - Les retours chariot isolés (barres de progression) et les caractères UTF-8 multi-octets sont restitués fidèlement.
 - La sortie de l'enfant n'est pas filtrée (préservation des applications plein écran) : ne lancer via `run` que des commandes de confiance.
 - Un bloc ```` ```mermaid ```` jamais refermé ou dépassant 1 Mio n'est plus retenu indéfiniment : il est restitué tel quel (texte brut) et l'interception reprend ; la mémoire de `strmaid run` reste constante quel que soit le volume émis par l'enfant.

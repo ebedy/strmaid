@@ -41,6 +41,8 @@ pub(crate) struct PagerApp {
     scroll: usize,
     auto_scroll: bool,
     stream_finished: bool,
+    /// Erreur de lecture du flux, affichée sans fermer le pager.
+    stream_error: Option<String>,
     visible_height: usize,
 }
 
@@ -52,24 +54,31 @@ impl PagerApp {
             scroll: 0,
             auto_scroll: true,
             stream_finished: false,
+            stream_error: None,
             visible_height: 20,
         }
     }
 
-    /// Ajoute un élément du flux sous forme de lignes texte sans séquence terminale,
-    /// `ratatui` n'interprétant ni les protocoles graphiques ni les SGR bruts.
+    /// Ajoute un élément du flux après son rendu en lignes texte.
+    #[cfg(test)]
     pub fn add_item(&mut self, item: StreamItem, options: RenderOptions) {
-        let new_lines = match item {
-            StreamItem::Text(text) => sanitized_lines(text.split('\n')),
-            StreamItem::Diagram(diagram) => sanitized_lines(
-                renderer::render_diagram(&diagram, pager_diagram_options(options)).lines(),
-            ),
-            StreamItem::OversizedDiagram { skipped_bytes } => {
-                sanitized_lines(renderer::render_oversized_notice(skipped_bytes, options).lines())
-            }
-        };
-        self.lines.extend(new_lines);
-        self.truncate_history(options.limits.max_pager_lines);
+        self.add_lines(
+            render_item_lines(item, options),
+            options.limits.max_pager_lines,
+        );
+    }
+
+    /// Ajoute des lignes déjà rendues puis applique la limite d'historique.
+    pub fn add_lines(&mut self, lines: Vec<String>, max_lines: usize) {
+        self.lines.extend(lines);
+        self.truncate_history(max_lines);
+    }
+
+    /// Termine le flux sur une erreur de lecture en conservant l'affichage.
+    fn fail_stream(&mut self, err: &CliError) {
+        let message = err.to_string();
+        self.stream_error = Some(sanitize_terminal_text(&message).into_owned());
+        self.stream_finished = true;
     }
 
     pub fn truncate_history(&mut self, max_lines: usize) {
@@ -127,6 +136,21 @@ impl PagerApp {
     }
 }
 
+/// Rend un élément du flux en lignes texte sans séquence terminale, `ratatui`
+/// n'interprétant ni les protocoles graphiques ni les SGR bruts. Exécuté dans le
+/// thread lecteur pour ne jamais bloquer la boucle d'événements.
+fn render_item_lines(item: StreamItem, options: RenderOptions) -> Vec<String> {
+    match item {
+        StreamItem::Text(text) => sanitized_lines(text.split('\n')),
+        StreamItem::Diagram(diagram) => sanitized_lines(
+            renderer::render_diagram(&diagram, pager_diagram_options(options)).lines(),
+        ),
+        StreamItem::OversizedDiagram { skipped_bytes } => {
+            sanitized_lines(renderer::render_oversized_notice(skipped_bytes, options).lines())
+        }
+    }
+}
+
 fn sanitized_lines<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
     lines
         .map(|line| sanitize_terminal_text(line).into_owned())
@@ -160,26 +184,27 @@ pub fn run_pager<R: BufRead + Send + 'static>(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| CliError::TerminalInit(e.to_string()))?;
 
-    let rx = spawn_reader_thread(reader, options.limits);
+    let rx = spawn_reader_thread(reader, options);
     let mut app = PagerApp::new();
 
     run_event_loop(&mut terminal, &mut app, &rx, options)
 }
 
-/// Démarre le thread d'arrière-plan de lecture de flux.
+/// Événement émis par le thread lecteur : lignes déjà rendues ou fin de flux.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PagerEvent {
-    Item(StreamItem),
+    Lines(Vec<String>),
     Finished,
 }
 
+/// Démarre le thread d'arrière-plan qui lit, analyse et rend le flux.
 fn spawn_reader_thread<R: BufRead + Send + 'static>(
     reader: R,
-    limits: crate::domain::ResourceLimits,
+    options: RenderOptions,
 ) -> Receiver<Result<PagerEvent, CliError>> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut machine = StreamStateMachine::with_limits(limits);
+        let mut machine = StreamStateMachine::with_limits(options.limits);
         for line_result in LossyLines::new(reader) {
             let line = match line_result {
                 Ok(line) => line.text,
@@ -192,12 +217,15 @@ fn spawn_reader_thread<R: BufRead + Send + 'static>(
             let Some(item) = machine.process_line(&line) else {
                 continue;
             };
-            if tx.send(Ok(PagerEvent::Item(item))).is_err() {
+            let lines = render_item_lines(item, options);
+            if tx.send(Ok(PagerEvent::Lines(lines))).is_err() {
                 return;
             }
         }
         if let Some(final_item) = machine.finish() {
-            let _ = tx.send(Ok(PagerEvent::Item(final_item)));
+            let _ = tx.send(Ok(PagerEvent::Lines(render_item_lines(
+                final_item, options,
+            ))));
         }
         let _ = tx.send(Ok(PagerEvent::Finished));
     });
@@ -222,7 +250,7 @@ fn run_event_loop(
     let mut dirty = true;
 
     loop {
-        if consume_pending_items(app, rx, options)? {
+        if consume_pending_items(app, rx, options) {
             dirty = true;
         }
 
@@ -273,35 +301,31 @@ fn process_terminal_event(app: &mut PagerApp, event: &Event) -> TerminalEventOut
     }
 }
 
-/// Consomme les éléments reçus du thread de streaming.
-/// Retourne `Ok(true)` si de nouveaux éléments ont été ajoutés ou si le statut a muté.
+/// Consomme les éléments reçus du thread de streaming sans bloquer.
+/// Retourne `true` si l'affichage a changé ; une erreur du lecteur termine le flux
+/// sans fermer le pager.
 fn consume_pending_items(
     app: &mut PagerApp,
     rx: &Receiver<Result<PagerEvent, CliError>>,
     options: RenderOptions,
-) -> Result<bool, CliError> {
+) -> bool {
     let mut changed = false;
     loop {
         match rx.try_recv() {
-            Ok(Ok(PagerEvent::Item(item))) => {
-                app.add_item(item, options);
+            Ok(Ok(PagerEvent::Lines(lines))) => {
+                app.add_lines(lines, options.limits.max_pager_lines);
                 changed = true;
             }
-            Ok(Ok(PagerEvent::Finished)) => {
-                if !app.stream_finished {
-                    app.stream_finished = true;
-                    changed = true;
-                }
+            Ok(Ok(PagerEvent::Finished)) | Err(TryRecvError::Disconnected) => {
+                let newly_finished = !app.stream_finished;
+                app.stream_finished = true;
+                return changed || newly_finished;
             }
-            Ok(Err(err)) => return Err(err),
-            Err(TryRecvError::Empty) => return Ok(changed),
-            Err(TryRecvError::Disconnected) => {
-                if !app.stream_finished {
-                    app.stream_finished = true;
-                    changed = true;
-                }
-                return Ok(changed);
+            Ok(Err(err)) => {
+                app.fail_stream(&err);
+                return true;
             }
+            Err(TryRecvError::Empty) => return changed,
         }
     }
 }
@@ -399,7 +423,9 @@ fn render_frame(frame: &mut Frame, app: &mut PagerApp) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
-    let visible_height = chunks[0].height as usize;
+    let title = frame_title(app);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let visible_height = usize::from(block.inner(chunks[0]).height);
     app.update_scroll_to_bottom(visible_height);
 
     let display_lines: Vec<Line> = app
@@ -410,14 +436,7 @@ fn render_frame(frame: &mut Frame, app: &mut PagerApp) {
         .map(|l| Line::from(l.as_str()))
         .collect();
 
-    let title = if app.stream_finished {
-        " Markdown Pager (Terminé) "
-    } else {
-        " Markdown Pager (Streaming...) "
-    };
-
-    let paragraph =
-        Paragraph::new(display_lines).block(Block::default().borders(Borders::ALL).title(title));
+    let paragraph = Paragraph::new(display_lines).block(block);
 
     frame.render_widget(paragraph, chunks[0]);
 
@@ -432,6 +451,14 @@ fn render_frame(frame: &mut Frame, app: &mut PagerApp) {
     )]));
 
     frame.render_widget(status_bar, chunks[1]);
+}
+
+fn frame_title(app: &PagerApp) -> String {
+    match (&app.stream_error, app.stream_finished) {
+        (Some(error), _) => format!(" Markdown Pager (Erreur : {error}) "),
+        (None, true) => " Markdown Pager (Terminé) ".to_string(),
+        (None, false) => " Markdown Pager (Streaming...) ".to_string(),
+    }
 }
 
 fn format_status_bar(
@@ -541,6 +568,78 @@ mod tests {
         assert!(app.lines.iter().any(|line| line.contains("xyz")));
     }
 
+    fn draw_to_text(app: &mut PagerApp, width: u16, height: u16) -> String {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height))
+                .unwrap_or_else(|_| unreachable!());
+        assert!(terminal.draw(|frame| render_frame(frame, app)).is_ok());
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn test_render_frame_keeps_last_line_visible_inside_borders() {
+        let mut app = PagerApp::new();
+        app.lines = (0..100).map(|i| format!("ligne {i}")).collect();
+
+        let screen = draw_to_text(&mut app, 40, 12);
+        assert_eq!(app.visible_height, 9);
+        assert!(screen.contains("ligne 99"), "écran : {screen}");
+    }
+
+    #[test]
+    fn test_reader_thread_sends_rendered_lines() {
+        let input = "titre\n```mermaid\ngraph TD\n  A --> B\n```\n";
+        let rx = spawn_reader_thread(Cursor::new(input), kitty_options());
+        let events: Vec<PagerEvent> = rx.iter().filter_map(Result::ok).collect();
+
+        assert_eq!(events.last(), Some(&PagerEvent::Finished));
+        let rendered: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                PagerEvent::Lines(lines) => Some(lines),
+                PagerEvent::Finished => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(rendered.first().map(|line| line.as_str()), Some("titre"));
+        assert!(rendered.iter().any(|line| line.contains('─')));
+        assert!(rendered.iter().all(|line| !line.contains('\x1b')));
+    }
+
+    #[test]
+    fn test_reader_error_keeps_pager_open_and_reports_it() {
+        let (tx, rx) = mpsc::channel();
+        assert!(
+            tx.send(Ok(PagerEvent::Lines(vec!["avant".to_string()])))
+                .is_ok()
+        );
+        assert!(
+            tx.send(Err(CliError::Io(
+                "disque \x1b]0;x\x07illisible".to_string()
+            )))
+            .is_ok()
+        );
+        let mut app = PagerApp::new();
+
+        assert!(consume_pending_items(
+            &mut app,
+            &rx,
+            RenderOptions::default()
+        ));
+        assert!(app.stream_finished);
+        assert_eq!(app.lines, vec!["avant"]);
+
+        let screen = draw_to_text(&mut app, 80, 6);
+        assert!(screen.contains("Erreur"), "écran : {screen}");
+        assert!(screen.contains("disque illisible"), "écran : {screen}");
+    }
+
     #[test]
     fn test_pager_scroll_navigation_with_dynamic_height() {
         let mut app = PagerApp::new();
@@ -567,22 +666,17 @@ mod tests {
     #[test]
     fn test_reader_thread_and_stream_finished() {
         let input = "line A\nline B\n";
-        let cursor = Cursor::new(input);
-        let rx = spawn_reader_thread(cursor, ResourceLimits::default());
-
-        let mut app = PagerApp::new();
         let options = RenderOptions::new(
             ThemeMode::Dark,
             GraphicsProtocol::HalfBlocks,
             ViewportGeometry::new(80, 24),
         );
+        let rx = spawn_reader_thread(Cursor::new(input), options);
+        let mut app = PagerApp::new();
 
-        let res = consume_pending_items(&mut app, &rx, options);
-        assert!(res.is_ok());
-
+        consume_pending_items(&mut app, &rx, options);
         thread::sleep(Duration::from_millis(50));
-        let res2 = consume_pending_items(&mut app, &rx, options);
-        assert!(res2.is_ok());
+        consume_pending_items(&mut app, &rx, options);
         assert!(app.stream_finished);
         assert_eq!(app.lines, vec!["line A", "line B"]);
     }
@@ -590,12 +684,15 @@ mod tests {
     #[test]
     fn test_reader_thread_tolerates_invalid_utf8() {
         let input: &[u8] = b"avant\n\xff\napres\n";
-        let rx = spawn_reader_thread(Cursor::new(input), ResourceLimits::default());
+        let rx = spawn_reader_thread(Cursor::new(input), RenderOptions::default());
         let mut app = PagerApp::new();
 
         thread::sleep(Duration::from_millis(50));
-        let res = consume_pending_items(&mut app, &rx, RenderOptions::default());
-        assert!(res.is_ok());
+        assert!(consume_pending_items(
+            &mut app,
+            &rx,
+            RenderOptions::default()
+        ));
         assert!(app.stream_finished);
         assert_eq!(app.lines, vec!["avant", "\u{fffd}", "apres"]);
     }
@@ -607,18 +704,17 @@ mod tests {
             max_diagram_bytes: 5,
             ..ResourceLimits::default()
         };
-        let rx = spawn_reader_thread(Cursor::new(input), limits);
-        let mut app = PagerApp::new();
         let options = RenderOptions::with_limits(
             ThemeMode::Dark,
             GraphicsProtocol::HalfBlocks,
             ViewportGeometry::new(80, 24),
             limits,
         );
+        let rx = spawn_reader_thread(Cursor::new(input), options);
+        let mut app = PagerApp::new();
 
         thread::sleep(Duration::from_millis(50));
-        let res = consume_pending_items(&mut app, &rx, options);
-        assert!(res.is_ok());
+        assert!(consume_pending_items(&mut app, &rx, options));
         assert!(app.stream_finished);
         assert!(
             app.lines
