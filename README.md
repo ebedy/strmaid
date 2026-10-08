@@ -31,6 +31,8 @@ Spécifiquement optimisé pour les pipelines de tuyauterie (`stdin -> stdout`, P
 - **Double Mode d'Exécution (Dual-Mode) :**
   - **Live Streaming Pager (Interactif TUI) :** Activé automatiquement sur un TTY interactif ou avec `--pager`. Interface plein écran basée sur [`ratatui`](https://crates.io/crates/ratatui), avec auto-scroll en direct pendant le streaming et navigation fluide au clavier (`j`/`k`, flèches, `q`). Les diagrammes y sont tracés en `AsciiBox` monochrome, seul rendu représentable par les widgets texte de `ratatui` ; utilisez `--no-pager` pour un rendu graphique Kitty, iTerm2 ou demi-blocs.
   - **Filtre Composable :** Activé automatiquement dans les pipes ou avec `--no-pager`. Agit comme un filtre `stdin -> stdout` classique, idéal pour composer avec `cat`, `grep`, `less -R` ou des redirections.
+- **Détection CommonMark des blocs Mermaid :**
+  Les blocs ```` ```mermaid ````, `~~~mermaid` et les fences longues (```` ````mermaid ````) sont reconnus, ainsi que le langage `mermaidjs`, y compris lorsqu'ils sont indentés dans une liste. Un bloc ne se ferme que sur une fence du même caractère et de longueur au moins égale, sans info-string : une ligne ```` ```js ```` interne ne le termine plus. Un ```` ```mermaid ```` placé dans un autre bloc de code (exemple de syntaxe dans un bloc ```` ````markdown ````) reste du texte. La même grammaire s'applique au filtre, au pager, à `strmaid run`, à `--block-only` et au serveur MCP.
 - **Repli Gracieux (Graceful Fallback) :**
   En cas d'erreur de syntaxe Mermaid, le diagramme est affiché sous forme de bloc de texte brut formaté avec un avertissement discret, sans interrompre le flux ni faire planter l'application.
 - **Flux résilient aux entrées hostiles :**

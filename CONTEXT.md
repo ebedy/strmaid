@@ -88,3 +88,10 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
   - *Plafonner les threads actifs* : rejeté car cela limite aussi les rendus légitimes concurrents d'un consommateur de la bibliothèque ; seuls les rendus abandonnés représentent une fuite.
   - *Journaliser chaque abandon sur stderr* : rejeté car stderr corromprait l'affichage du pager plein écran ; l'abandon reste visible dans le repli ou le résultat d'outil.
 - **Conséquences :** un rendu orphelin consomme du CPU jusqu'à sa terminaison naturelle ; l'annulation coopérative de `merman` (`OperationControl::with_deadline`) exigerait de transmettre le délai via `DiagramEngine` et reste à faire.
+
+### 9. Grammaire Unique des Fences (`CodeFence`)
+- **Choix :** un value object `domain::CodeFence` porte la grammaire CommonMark des blocs de code (au moins trois `` ` `` ou `~`, langage `mermaid` ou `mermaidjs`, fermeture de même caractère et de longueur supérieure ou égale sans info-string). Il est consommé par `StreamStateMachine`, `PtyStreamProcessor` et `DiagramBlock::from_raw` ; les blocs de code d'un autre langage sont suivis jusqu'à leur clôture pour ne pas interpréter un ```` ```mermaid ```` qu'ils contiennent.
+- **Alternatives rejetées :**
+  - *Indentation limitée à trois espaces (CommonMark strict)* : rejetée car, sans analyse des listes, elle cesse de reconnaître les diagrammes imbriqués dans une liste, fréquents dans les sorties de LLM. Conséquence assumée : un bloc de code indenté de quatre espaces contenant ```` ```mermaid ```` est rendu.
+  - *Préfixe littéral ```` ```mermaid ```` par point d'entrée* : rejeté car quatre implémentations divergentes produisaient des résultats différents selon le mode (fermeture sur ```` ```js ````, tildes ignorés, métadonnées perdues côté MCP).
+- **Conséquences :** une table de fixtures commune (`tests/fence_fixtures.rs`) garantit l'équivalence des trois points d'entrée ; `pty::is_mermaid_fence_start` et `pty::is_fence_end` sont supprimées.

@@ -392,6 +392,11 @@ Pour consommer et afficher un flux Markdown en temps réel émis par un processu
 commande_source | strmaid --no-pager
 ```
 
+### Grammaire des blocs reconnus
+- Ouverture : au moins trois `` ` `` ou `~` identiques suivis du langage `mermaid` ou `mermaidjs` (attributs `title`, `theme`, `width` optionnels) ; l'indentation est tolérée (blocs dans une liste).
+- Fermeture : même caractère, longueur au moins égale à l'ouverture, aucune info-string.
+- **Règle pour l'agent :** pour montrer un exemple de syntaxe Mermaid **sans** le faire rendre, l'entourer d'un bloc d'un autre langage plus long, par exemple ```` ````markdown ```` ; pour inclure une ligne ```` ``` ```` dans un diagramme, ouvrir le bloc avec quatre backticks.
+
 ### B. Intercepteur interactif en pseudo-terminal (`strmaid run`)
 Pour exécuter une session interactive (ex. CLI d'un agent IA, REPL) au sein d'un pseudo-terminal (PTY Unix ou ConPTY Windows) tout en interceptant automatiquement les diagrammes Mermaid au vol pour les afficher directement en graphisme terminal :
 ```bash
