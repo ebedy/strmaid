@@ -1,4 +1,4 @@
-use crate::domain::{CliError, DiagramBlock, DiagramMetadata, ResourceLimits};
+use crate::domain::{CliError, CodeFence, DiagramBlock, ResourceLimits};
 use std::io::{self, BufRead, Read};
 use std::mem;
 
@@ -158,13 +158,13 @@ pub enum StreamItem {
 struct DiagramCapture {
     buffer: Vec<String>,
     bytes_used: usize,
-    metadata: DiagramMetadata,
+    fence: CodeFence,
     opening_fence: String,
 }
 
 impl DiagramCapture {
     fn into_block(self) -> DiagramBlock {
-        DiagramBlock::with_metadata(self.buffer.join("\n"), self.metadata)
+        DiagramBlock::with_metadata(self.buffer.join("\n"), self.fence.metadata())
     }
 
     fn into_unclosed_text(self) -> String {
@@ -176,11 +176,19 @@ impl DiagramCapture {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum State {
     Passthrough,
+    /// Bloc de code non Mermaid : relayé en texte jusqu'à sa clôture, un
+    /// ```` ```mermaid ```` qu'il contient n'est pas interprété.
+    InForeignFence(CodeFence),
     CapturingDiagram(DiagramCapture),
     /// Bloc hors quota drainé jusqu'à sa clôture sans accumulation mémoire.
-    SkippingOversizedDiagram {
-        skipped_bytes: usize,
-    },
+    SkippingOversizedDiagram(OversizedSkip),
+}
+
+/// Bloc hors quota en cours de drainage : seul son volume est conservé.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OversizedSkip {
+    fence: CodeFence,
+    skipped_bytes: usize,
 }
 
 /// Machine à états pour l'analyse d'un flux Markdown en streaming.
@@ -218,38 +226,50 @@ impl StreamStateMachine {
         let sanitized = line.strip_suffix('\r').unwrap_or(line);
         match mem::replace(&mut self.state, State::Passthrough) {
             State::Passthrough => self.process_passthrough(sanitized),
+            State::InForeignFence(fence) => Some(self.process_foreign(sanitized, fence)),
             State::CapturingDiagram(capture) => self.process_capture(sanitized, capture),
-            State::SkippingOversizedDiagram { skipped_bytes } => {
-                self.process_skip(sanitized, skipped_bytes)
-            }
+            State::SkippingOversizedDiagram(skip) => self.process_skip(sanitized, skip),
         }
     }
 
     /// Gère une ligne en mode Passthrough.
     fn process_passthrough(&mut self, line: &str) -> Option<StreamItem> {
-        let trimmed = line.trim_start();
-        let Some(info) = trimmed.strip_prefix("```mermaid") else {
-            return Some(StreamItem::Text(line.to_string()));
+        let text = Some(StreamItem::Text(line.to_string()));
+        let Some(fence) = CodeFence::parse_opening(line) else {
+            return text;
         };
+        if !fence.is_mermaid() {
+            self.state = State::InForeignFence(fence);
+            return text;
+        }
         self.state = State::CapturingDiagram(DiagramCapture {
             buffer: Vec::new(),
             bytes_used: 0,
-            metadata: DiagramMetadata::parse_fenced_info(info),
+            fence,
             opening_fence: line.to_string(),
         });
         None
     }
 
+    /// Gère une ligne d'un bloc de code non Mermaid, relayée telle quelle.
+    fn process_foreign(&mut self, line: &str, fence: CodeFence) -> StreamItem {
+        if !fence.is_closed_by(line) {
+            self.state = State::InForeignFence(fence);
+        }
+        StreamItem::Text(line.to_string())
+    }
+
     /// Gère une ligne en mode Accumulation de diagramme.
     fn process_capture(&mut self, line: &str, mut capture: DiagramCapture) -> Option<StreamItem> {
-        if is_closing_fence(line) {
+        if capture.fence.is_closed_by(line) {
             return Some(StreamItem::Diagram(capture.into_block()));
         }
         let next_bytes = accumulate_line_bytes(capture.bytes_used, line);
         if next_bytes > self.limits.max_diagram_bytes {
-            self.state = State::SkippingOversizedDiagram {
+            self.state = State::SkippingOversizedDiagram(OversizedSkip {
+                fence: capture.fence,
                 skipped_bytes: next_bytes,
-            };
+            });
             return None;
         }
         capture.buffer.push(line.to_string());
@@ -259,32 +279,29 @@ impl StreamStateMachine {
     }
 
     /// Gère une ligne d'un bloc hors quota : seul le volume est comptabilisé.
-    fn process_skip(&mut self, line: &str, skipped_bytes: usize) -> Option<StreamItem> {
-        if is_closing_fence(line) {
-            return Some(StreamItem::OversizedDiagram { skipped_bytes });
+    fn process_skip(&mut self, line: &str, mut skip: OversizedSkip) -> Option<StreamItem> {
+        if skip.fence.is_closed_by(line) {
+            return Some(StreamItem::OversizedDiagram {
+                skipped_bytes: skip.skipped_bytes,
+            });
         }
-        self.state = State::SkippingOversizedDiagram {
-            skipped_bytes: accumulate_line_bytes(skipped_bytes, line),
-        };
+        skip.skipped_bytes = accumulate_line_bytes(skip.skipped_bytes, line);
+        self.state = State::SkippingOversizedDiagram(skip);
         None
     }
 
     /// Finalise le flux à la réception d'EOF.
     pub fn finish(&mut self) -> Option<StreamItem> {
         match mem::replace(&mut self.state, State::Passthrough) {
-            State::Passthrough => None,
+            State::Passthrough | State::InForeignFence(_) => None,
             State::CapturingDiagram(capture) => {
                 Some(StreamItem::Text(capture.into_unclosed_text()))
             }
-            State::SkippingOversizedDiagram { skipped_bytes } => {
-                Some(StreamItem::OversizedDiagram { skipped_bytes })
-            }
+            State::SkippingOversizedDiagram(skip) => Some(StreamItem::OversizedDiagram {
+                skipped_bytes: skip.skipped_bytes,
+            }),
         }
     }
-}
-
-fn is_closing_fence(line: &str) -> bool {
-    line.trim().starts_with("```")
 }
 
 /// Volume cumulé d'un bloc après ajout d'une ligne et de son saut de ligne.

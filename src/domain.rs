@@ -291,6 +291,93 @@ impl DiagramMetadata {
     }
 }
 
+/// Caractère de clôture d'un bloc de code `CommonMark`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FenceMarker {
+    Backtick,
+    Tilde,
+}
+
+impl FenceMarker {
+    const fn from_char(ch: char) -> Option<Self> {
+        match ch {
+            '`' => Some(Self::Backtick),
+            '~' => Some(Self::Tilde),
+            _ => None,
+        }
+    }
+
+    const fn as_char(self) -> char {
+        match self {
+            Self::Backtick => '`',
+            Self::Tilde => '~',
+        }
+    }
+}
+
+/// Clôture d'ouverture d'un bloc de code selon `CommonMark` : au moins trois `` ` `` ou
+/// `~` identiques, suivis d'une info-string dont le premier mot est le langage.
+///
+/// Écart assumé : l'indentation n'est pas limitée à trois espaces, afin de reconnaître
+/// les blocs imbriqués dans des listes sans analyser leur structure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodeFence {
+    marker: FenceMarker,
+    length: usize,
+    language: String,
+    attributes: String,
+}
+
+impl CodeFence {
+    /// Analyse une ligne d'ouverture ; `None` si la ligne n'ouvre aucun bloc de code.
+    #[must_use]
+    pub fn parse_opening(line: &str) -> Option<Self> {
+        let trimmed = line.trim_start();
+        let marker = FenceMarker::from_char(trimmed.chars().next()?)?;
+        let length = marker_run_length(trimmed, marker);
+        if length < 3 {
+            return None;
+        }
+        let info = trimmed[length..].trim();
+        if marker == FenceMarker::Backtick && info.contains('`') {
+            return None;
+        }
+        let (language, attributes) = info.split_once(char::is_whitespace).unwrap_or((info, ""));
+        Some(Self {
+            marker,
+            length,
+            language: language.to_string(),
+            attributes: attributes.to_string(),
+        })
+    }
+
+    /// Indique si `line` ferme ce bloc : même caractère, longueur supérieure ou égale,
+    /// aucune info-string.
+    #[must_use]
+    pub fn is_closed_by(&self, line: &str) -> bool {
+        let trimmed = line.trim();
+        let marker = self.marker.as_char();
+        trimmed.len() >= self.length && trimmed.chars().all(|ch| ch == marker)
+    }
+
+    /// Bloc dont le langage désigne un diagramme Mermaid (`mermaid` ou `mermaidjs`).
+    #[must_use]
+    pub fn is_mermaid(&self) -> bool {
+        matches!(self.language.as_str(), "mermaid" | "mermaidjs")
+    }
+
+    /// Métadonnées `title`, `theme` et `width` déclarées après le langage.
+    #[must_use]
+    pub fn metadata(&self) -> DiagramMetadata {
+        DiagramMetadata::parse_fenced_info(&self.attributes)
+    }
+}
+
+fn marker_run_length(text: &str, marker: FenceMarker) -> usize {
+    let marker = marker.as_char();
+    text.chars().take_while(|&ch| ch == marker).count()
+}
+
 fn parse_positive_width(val: &str) -> Option<u16> {
     val.parse::<u16>().ok().filter(|&w| w > 0)
 }
@@ -424,33 +511,25 @@ impl DiagramBlock {
     }
 }
 
+/// Extrait le contenu d'un bloc éventuellement entouré de fences, avec la même
+/// grammaire que le streaming : métadonnées lues sur une fence Mermaid, contenu
+/// jusqu'à la clôture correspondante. Sans fence d'ouverture, le texte est le contenu.
 fn extract_mermaid_content_and_meta(input: &str) -> (String, DiagramMetadata) {
     let trimmed = input.trim();
-    if let Some(after_fence) = trimmed.strip_prefix("```mermaid") {
-        let (first_line, rest) = after_fence
-            .split_once(['\n', '\r'])
-            .unwrap_or((after_fence, ""));
-        let meta = DiagramMetadata::parse_fenced_info(first_line);
-        let content = strip_closing_fence(rest);
-        (content, meta)
-    } else if let Some(after_fence) = trimmed.strip_prefix("```") {
-        let (_, rest) = after_fence
-            .split_once(['\n', '\r'])
-            .unwrap_or((after_fence, ""));
-        let content = strip_closing_fence(rest);
-        (content, DiagramMetadata::default())
+    let (first_line, rest) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
+    let Some(fence) = CodeFence::parse_opening(first_line) else {
+        return (trimmed.to_string(), DiagramMetadata::default());
+    };
+    let metadata = if fence.is_mermaid() {
+        fence.metadata()
     } else {
-        (strip_closing_fence(trimmed), DiagramMetadata::default())
-    }
-}
-
-fn strip_closing_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(stripped) = trimmed.strip_suffix("```") {
-        stripped.trim().to_string()
-    } else {
-        trimmed.to_string()
-    }
+        DiagramMetadata::default()
+    };
+    let content: Vec<&str> = rest
+        .lines()
+        .take_while(|line| !fence.is_closed_by(line))
+        .collect();
+    (content.join("\n").trim().to_string(), metadata)
 }
 
 /// Élimine les sentinelles Markdown éventuelles entourant une spécification Mermaid.
@@ -841,6 +920,49 @@ mod tests {
     fn test_viewport_geometry_target_columns_does_not_overflow() {
         assert_eq!(ViewportGeometry::new(8000, 24).target_columns(), 7200);
         assert_eq!(ViewportGeometry::new(u16::MAX, 24).target_columns(), 58981);
+    }
+
+    fn opening(line: &str) -> Option<CodeFence> {
+        CodeFence::parse_opening(line)
+    }
+
+    #[test]
+    fn test_code_fence_parses_backtick_and_tilde_openings() {
+        let backtick = opening("```mermaid title=\"T\" width=60");
+        assert!(backtick.as_ref().is_some_and(CodeFence::is_mermaid));
+        let metadata = backtick.map(|fence| fence.metadata()).unwrap_or_default();
+        assert_eq!(metadata.title.as_deref(), Some("T"));
+        assert_eq!(metadata.width_override, Some(60));
+
+        assert!(opening("~~~mermaid").is_some_and(|f| f.is_mermaid()));
+        assert!(opening("````mermaid").is_some_and(|f| f.is_mermaid()));
+        assert!(opening("```mermaidjs").is_some_and(|f| f.is_mermaid()));
+        assert!(opening("     ```mermaid").is_some_and(|f| f.is_mermaid()));
+    }
+
+    #[test]
+    fn test_code_fence_rejects_invalid_openings() {
+        assert!(opening("``mermaid").is_none());
+        assert!(opening("Texte ordinaire").is_none());
+        assert!(opening("``` mermaid `inline`").is_none());
+        assert!(opening("```mermaid-x").is_some_and(|f| !f.is_mermaid()));
+        assert!(opening("```rust").is_some_and(|f| !f.is_mermaid()));
+        assert!(opening("~~~ avec `backtick`").is_some());
+    }
+
+    #[test]
+    fn test_code_fence_closing_rules() {
+        let fence = opening("````mermaid").unwrap_or_else(|| unreachable!());
+        assert!(fence.is_closed_by("````"));
+        assert!(fence.is_closed_by("  `````  "));
+        assert!(!fence.is_closed_by("```"));
+        assert!(!fence.is_closed_by("````js"));
+        assert!(!fence.is_closed_by("~~~~"));
+        assert!(!fence.is_closed_by(""));
+
+        let tilde = opening("~~~mermaid").unwrap_or_else(|| unreachable!());
+        assert!(tilde.is_closed_by("~~~"));
+        assert!(!tilde.is_closed_by("```"));
     }
 
     #[test]

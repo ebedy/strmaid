@@ -1,4 +1,4 @@
-use crate::domain::{CliError, DiagramBlock, strip_ansi};
+use crate::domain::{CliError, CodeFence, DiagramBlock, strip_ansi};
 use crate::renderer::{self, RenderOptions};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{self, IsTerminal, Read, Write};
@@ -60,6 +60,8 @@ const PTY_CHANNEL_CAPACITY: usize = 64;
 #[derive(Debug, PartialEq, Eq)]
 enum InterceptorState {
     Passthrough,
+    /// Bloc de code non Mermaid relayé tel quel jusqu'à sa clôture.
+    InForeignFence(CodeFence),
     Capturing(CaptureProgress),
 }
 
@@ -67,24 +69,9 @@ enum InterceptorState {
 #[derive(Debug, PartialEq, Eq)]
 struct CaptureProgress {
     buffer: Vec<String>,
+    fence: CodeFence,
     opening_fence: String,
     bytes_used: usize,
-}
-
-/// Détecte si une ligne correspond au début d'un bloc fenced Mermaid.
-#[must_use]
-pub fn is_mermaid_fence_start(line: &str) -> bool {
-    let clean = strip_ansi(line);
-    let trimmed = clean.trim_start();
-    trimmed.starts_with("```mermaid")
-}
-
-/// Détecte si une ligne correspond à la fermeture d'un bloc fenced.
-#[must_use]
-pub fn is_fence_end(line: &str) -> bool {
-    let clean = strip_ansi(line);
-    let trimmed = clean.trim();
-    trimmed == "```"
 }
 
 /// Écrit du texte dans le terminal brut en garantissant la séquence CR-LF.
@@ -204,23 +191,38 @@ impl<W: Write> PtyStreamProcessor<W> {
     fn process_completed_line(&mut self, line: &str) -> Result<(), CliError> {
         match std::mem::replace(&mut self.state, InterceptorState::Passthrough) {
             InterceptorState::Passthrough => self.handle_passthrough_line(line),
+            InterceptorState::InForeignFence(fence) => self.handle_foreign_line(line, fence),
             InterceptorState::Capturing(capture) => self.handle_capturing_line(line, capture),
         }
     }
 
     fn handle_passthrough_line(&mut self, line: &str) -> Result<(), CliError> {
-        if is_mermaid_fence_start(line) {
-            self.state = InterceptorState::Capturing(CaptureProgress {
-                buffer: Vec::new(),
-                opening_fence: line.to_string(),
-                bytes_used: 0,
-            });
-            Ok(())
-        } else {
-            self.state = InterceptorState::Passthrough;
-            write_raw_crlf(&mut self.writer, line)?;
-            write_raw_crlf(&mut self.writer, "\n")
+        let Some(fence) = CodeFence::parse_opening(&strip_ansi(line)) else {
+            return self.write_line(line);
+        };
+        if !fence.is_mermaid() {
+            self.state = InterceptorState::InForeignFence(fence);
+            return self.write_line(line);
         }
+        self.state = InterceptorState::Capturing(CaptureProgress {
+            buffer: Vec::new(),
+            fence,
+            opening_fence: line.to_string(),
+            bytes_used: 0,
+        });
+        Ok(())
+    }
+
+    fn handle_foreign_line(&mut self, line: &str, fence: CodeFence) -> Result<(), CliError> {
+        if !fence.is_closed_by(&strip_ansi(line)) {
+            self.state = InterceptorState::InForeignFence(fence);
+        }
+        self.write_line(line)
+    }
+
+    fn write_line(&mut self, line: &str) -> Result<(), CliError> {
+        write_raw_crlf(&mut self.writer, line)?;
+        write_raw_crlf(&mut self.writer, "\n")
     }
 
     fn handle_capturing_line(
@@ -228,10 +230,9 @@ impl<W: Write> PtyStreamProcessor<W> {
         line: &str,
         mut capture: CaptureProgress,
     ) -> Result<(), CliError> {
-        if is_fence_end(line) {
-            let raw_content = capture.buffer.join("\n");
-            let opening_fence = &capture.opening_fence;
-            let diagram = DiagramBlock::from_raw(&format!("{opening_fence}\n{raw_content}\n```"));
+        if capture.fence.is_closed_by(&strip_ansi(line)) {
+            let diagram =
+                DiagramBlock::with_metadata(capture.buffer.join("\n"), capture.fence.metadata());
             let rendered = renderer::render_diagram(&diagram, self.options);
             return write_raw_crlf(&mut self.writer, &rendered);
         }
@@ -240,9 +241,8 @@ impl<W: Write> PtyStreamProcessor<W> {
             .saturating_add(line.len())
             .saturating_add(1);
         if next_bytes > self.options.limits.max_diagram_bytes {
-            self.reemit_capture(capture)?;
-            write_raw_crlf(&mut self.writer, line)?;
-            return write_raw_crlf(&mut self.writer, "\n");
+            self.abandon_capture(capture)?;
+            return self.write_line(line);
         }
         capture.buffer.push(strip_ansi(line));
         capture.bytes_used = next_bytes;
@@ -251,21 +251,26 @@ impl<W: Write> PtyStreamProcessor<W> {
     }
 
     /// Restitue tel quel un bloc dont la capture est abandonnée (dépassement de
-    /// `max_diagram_bytes` ou fin de flux) ; l'état reste `Passthrough`.
-    fn reemit_capture(&mut self, capture: CaptureProgress) -> Result<(), CliError> {
-        write_raw_crlf(&mut self.writer, &capture.opening_fence)?;
-        write_raw_crlf(&mut self.writer, "\n")?;
-        for line in capture.buffer {
-            write_raw_crlf(&mut self.writer, &line)?;
-            write_raw_crlf(&mut self.writer, "\n")?;
-        }
+    /// `max_diagram_bytes` ou fin de flux) ; la suite du bloc, clôture comprise, est
+    /// ensuite relayée comme un bloc de code non Mermaid.
+    fn abandon_capture(&mut self, capture: CaptureProgress) -> Result<(), CliError> {
+        self.write_line(&capture.opening_fence)?;
+        capture
+            .buffer
+            .iter()
+            .try_for_each(|line| self.write_line(line))?;
+        self.state = InterceptorState::InForeignFence(capture.fence);
         Ok(())
     }
 
-    /// Repasse en `Passthrough` en restituant l'éventuelle capture en cours.
-    fn reemit_pending_capture(&mut self) -> Result<(), CliError> {
+    /// Abandonne l'éventuelle capture en cours en restituant son contenu.
+    fn abandon_pending_capture(&mut self) -> Result<(), CliError> {
         match std::mem::replace(&mut self.state, InterceptorState::Passthrough) {
-            InterceptorState::Capturing(capture) => self.reemit_capture(capture),
+            InterceptorState::Capturing(capture) => self.abandon_capture(capture),
+            InterceptorState::InForeignFence(fence) => {
+                self.state = InterceptorState::InForeignFence(fence);
+                Ok(())
+            }
             InterceptorState::Passthrough => Ok(()),
         }
     }
@@ -279,15 +284,15 @@ impl<W: Write> PtyStreamProcessor<W> {
         if projected <= self.options.limits.max_diagram_bytes {
             return Ok(());
         }
-        self.reemit_pending_capture()
+        self.abandon_pending_capture()
     }
 
     fn flush_pending_interactive(&mut self) -> Result<(), CliError> {
-        if self.state != InterceptorState::Passthrough {
+        if matches!(self.state, InterceptorState::Capturing(_)) {
             return Ok(());
         }
         let clean = strip_ansi(&self.pending_line);
-        let may_open_fence = clean.trim_start().starts_with('`');
+        let may_open_fence = clean.trim_start().starts_with(['`', '~']);
         if may_open_fence && self.pending_line.len() <= MAX_PENDING_LINE_BYTES {
             return Ok(());
         }
@@ -304,7 +309,7 @@ impl<W: Write> PtyStreamProcessor<W> {
         if !undecoded_tail.is_empty() {
             self.process_chunk(&undecoded_tail)?;
         }
-        self.reemit_pending_capture()?;
+        self.abandon_pending_capture()?;
         if !self.pending_line.is_empty() {
             let pending = std::mem::take(&mut self.pending_line);
             write_raw_crlf(&mut self.writer, &pending)?;
@@ -433,18 +438,37 @@ mod tests {
     use super::*;
     use crate::domain::ResourceLimits;
 
-    #[test]
-    fn test_is_mermaid_fence_detection() {
-        assert!(is_mermaid_fence_start("```mermaid"));
-        assert!(is_mermaid_fence_start("  ```mermaid title=\"Test\""));
-        assert!(is_mermaid_fence_start("\x1b[32m```mermaid\x1b[0m"));
-        assert!(!is_mermaid_fence_start("```rust"));
-        assert!(!is_mermaid_fence_start("Texte ordinaire"));
+    fn processed_output(chunks: &[&str]) -> String {
+        let mut out = Vec::new();
+        let options = RenderOptions::new(
+            crate::domain::ThemeMode::Mono,
+            crate::domain::GraphicsProtocol::AsciiBox,
+            crate::domain::ViewportGeometry::new(80, 24),
+        );
+        let mut processor = PtyStreamProcessor::new(&mut out, options);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| processor.process_chunk(chunk).is_ok())
+        );
+        assert!(processor.finish().is_ok());
+        String::from_utf8(out).unwrap_or_default()
+    }
 
-        assert!(is_fence_end("```"));
-        assert!(is_fence_end("  ```  "));
-        assert!(is_fence_end("\x1b[0m```\x1b[0m"));
-        assert!(!is_fence_end("```mermaid"));
+    #[test]
+    fn test_pty_processor_detects_ansi_colored_fences() {
+        let output = processed_output(&[
+            "\x1b[32m```mermaid\x1b[0m\ngraph TD\n  A --> B\n\x1b[0m```\x1b[0m\nfin\n",
+        ]);
+        assert!(!output.contains("```mermaid"), "sortie : {output:?}");
+        assert!(output.contains("fin"));
+    }
+
+    #[test]
+    fn test_pty_processor_holds_tilde_fence_split_across_chunks() {
+        let output = processed_output(&["~~", "~mermaid\ngraph TD\n  A --> B\n~~~\n"]);
+        assert!(!output.contains("~~~mermaid"), "sortie : {output:?}");
+        assert!(!output.contains("A --> B"), "sortie : {output:?}");
     }
 
     #[test]
@@ -550,7 +574,10 @@ mod tests {
         let long_line = "c".repeat(40);
         assert!(processor.process_chunk("```mermaid\n").is_ok());
         assert!(processor.process_chunk(&long_line).is_ok());
-        assert_eq!(processor.state, InterceptorState::Passthrough);
+        assert!(matches!(
+            processor.state,
+            InterceptorState::InForeignFence(_)
+        ));
         assert_eq!(processor.pending_line.len(), 0);
 
         let out_str = String::from_utf8(out).unwrap_or_default();

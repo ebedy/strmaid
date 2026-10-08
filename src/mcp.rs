@@ -1,7 +1,7 @@
 use crate::domain::{
-    CliError, DiagramBlock, RasterizedImage, ResourceLimits, ThemeMode, strip_mermaid_fences,
+    CliError, DiagramBlock, DiagramEngineType, RasterizedImage, ResourceLimits, ThemeMode,
 };
-use crate::mermaid::{self, DiagramEngine};
+use crate::mermaid;
 use crate::rasterizer;
 use crate::renderer;
 use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
@@ -328,36 +328,37 @@ fn oversized_source_error(source: &str, limits: &ResourceLimits) -> Option<ToolC
     })
 }
 
-/// Rendu MCP complet (SVG, rasterisation, PNG) exécuté sous une seule garde temporelle.
+/// Rendu MCP complet (SVG, rasterisation, PNG) exécuté sous une seule garde temporelle,
+/// par le même pipeline que le CLI (substitution des esperluettes de libellés comprise).
 struct McpRenderJob {
     block: DiagramBlock,
     theme: ThemeMode,
-    engine: &'static dyn DiagramEngine,
+    engine_type: DiagramEngineType,
     target_width_px: u32,
     max_raster_pixels: u32,
 }
 
 impl McpRenderJob {
     fn prepare(params: &McpRenderParams<'_>, limits: &ResourceLimits) -> Result<Self, CliError> {
-        let engine = mermaid::engine_by_name(params.engine_name.unwrap_or("mermaid-svg"))?;
+        let engine_type =
+            mermaid::engine_type_by_name(params.engine_name.unwrap_or("mermaid-svg"))?;
         let target_cols =
             u16::try_from(params.width_col.unwrap_or(80).clamp(20, 1000)).unwrap_or(80);
         Ok(Self {
-            block: DiagramBlock::from_raw(&strip_mermaid_fences(params.source)),
+            block: DiagramBlock::from_raw(params.source),
             theme: params
                 .theme_name
                 .map_or(ThemeMode::Dark, ThemeMode::from_str_name),
-            engine,
+            engine_type,
             target_width_px: u32::from(target_cols).saturating_mul(8),
             max_raster_pixels: limits.max_raster_pixels,
         })
     }
 
     fn run(self) -> Result<RenderOutput, CliError> {
-        let svg = self
-            .engine
-            .render_svg(&self.block, self.theme)
-            .map_err(|err| CliError::MermaidSyntax(err.message))?;
+        let svg =
+            mermaid::render_to_svg_detailed_with_engine(&self.block, self.theme, self.engine_type)
+                .map_err(|err| CliError::MermaidSyntax(err.message))?;
         let rasterized =
             rasterizer::rasterize_svg(&svg, self.target_width_px, self.max_raster_pixels)?;
         let png_base64 = encode_png_base64(&rasterized)?;
@@ -402,7 +403,7 @@ fn validate_source(source: &str, limits: &ResourceLimits) -> ToolCallResult {
     if let Some(error) = oversized_source_error(source, limits) {
         return error;
     }
-    let block = DiagramBlock::from_raw(&strip_mermaid_fences(source));
+    let block = DiagramBlock::from_raw(source);
     match renderer::run_with_render_timeout(move || Ok(validate_block(&block)), limits) {
         Ok(output) => structured_tool_result(&output),
         Err(err) => make_tool_error(&format!("Validation Mermaid interrompue: {err}")),
@@ -587,6 +588,47 @@ mod tests {
             let text = result["content"][0]["text"].as_str().unwrap_or("");
             assert!(text.contains("octets"), "outil {tool} : {text}");
         }
+    }
+
+    fn tool_result(input: &str) -> Value {
+        run_lines(input)
+            .first()
+            .and_then(|resp| resp.result.clone())
+            .unwrap_or(Value::Null)
+    }
+
+    #[test]
+    fn test_mcp_render_applies_cli_label_sanitization() {
+        let source = "flowchart TD\n  A[\"Tom & Jerry\"] --> B";
+        let result = tool_result(&tool_call(
+            1,
+            "strmaid_render",
+            &json!({ "source": source }),
+        ));
+        assert_eq!(result["isError"], false);
+        assert!(result["svg"].as_str().unwrap_or("").contains('﹠'));
+    }
+
+    #[test]
+    fn test_mcp_render_accepts_fenced_source_with_metadata() {
+        let source = "~~~mermaid title=\"T\"\nflowchart TD\n  A --> B\n~~~";
+        let result = tool_result(&tool_call(
+            1,
+            "strmaid_render",
+            &json!({ "source": source }),
+        ));
+        assert_eq!(result["isError"], false);
+    }
+
+    #[test]
+    fn test_mcp_detect_recognizes_tilde_fences() {
+        let markdown = "texte\n~~~mermaid\ngraph TD\n  A --> B\n~~~\n";
+        let result = tool_result(&tool_call(
+            1,
+            "strmaid_detect",
+            &json!({ "markdown": markdown }),
+        ));
+        assert_eq!(result["diagram_count"], 1);
     }
 
     #[test]
