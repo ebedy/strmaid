@@ -10,13 +10,15 @@ use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Write};
 
-const DIAGNOSTIC_ENV_VARS: [&str; 6] = [
+const DIAGNOSTIC_ENV_VARS: [&str; 8] = [
     "KITTY_WINDOW_ID",
     "TERM_PROGRAM",
     "COLORTERM",
     "TERM",
     "WT_SESSION",
     "NO_COLOR",
+    "TMUX",
+    "STY",
 ];
 
 const SAMPLE_MERMAID: &str = "flowchart LR\n    A-->B";
@@ -263,6 +265,13 @@ mod tests {
             json_val["pipeline"]["font_faces"],
             rasterizer::loaded_font_count()
         );
+    }
+
+    #[test]
+    fn test_doctor_reports_multiplexer_variables() {
+        let report = DoctorReport::collect();
+        assert!(report.environment.variables.contains_key("TMUX"));
+        assert!(report.environment.variables.contains_key("STY"));
     }
 
     #[test]
