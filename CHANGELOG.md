@@ -6,6 +6,19 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
+## [Non publié]
+
+### Corrections
+
+- Rendu `AsciiBox` (pager et repli des protocoles graphiques) :
+  - les guillemets englobant un libellé de nœud de flowchart ne sont plus affichés
+    (`A["texte"]` rendu `texte`), sauf pour un libellé contenant `;` ou des
+    délimiteurs non équilibrés, que `mermaid-text` ne lit pas sans guillemets ;
+  - une arête `A --> |texte| B`, avec une espace avant le libellé, est rendue comme
+    une arête libellée et non plus comme un nœud unique ;
+  - `&` est affiché tel quel au lieu de `﹠` : la neutralisation des esperluettes
+    est réservée au rendu SVG.
+
 ## [0.5.0] - 2026-10-09
 
 ### Ruptures de compatibilité
@@ -74,4 +87,5 @@ rupture de compatibilité incrémente la version mineure.
   limité aux secrets.
 - Preuves de charge `#[ignore]` (`cargo test --release --test stress -- --ignored`).
 
+[Non publié]: https://github.com/ebedy/strmaid/compare/v0.5.0...HEAD
 [0.5.0]: https://github.com/ebedy/strmaid/compare/v0.4.0...v0.5.0
