@@ -144,26 +144,18 @@ fn prepare_diagram_for_rendering(
     diagram: &DiagramBlock,
     options: RenderOptions,
 ) -> Cow<'_, DiagramBlock> {
-    let sanitized = mermaid::sanitize_mermaid_labels(diagram.as_str());
+    // La neutralisation des esperluettes reste propre au chemin SVG
+    // (`render_to_svg_detailed_with_engine`) : `mermaid-text` lit `&` sans dislocation.
     let target_cols = options.viewport.columns.max(10);
-    let adapted = if options.auto_orient {
-        mermaid::adapt_direction_for_viewport(&sanitized, target_cols)
-    } else {
-        Cow::Borrowed(sanitized.as_ref())
-    };
-
-    if let Cow::Owned(content) = adapted {
-        Cow::Owned(DiagramBlock::with_metadata(
+    if !options.auto_orient {
+        return Cow::Borrowed(diagram);
+    }
+    match mermaid::adapt_direction_for_viewport(diagram.as_str(), target_cols) {
+        Cow::Owned(content) => Cow::Owned(DiagramBlock::with_metadata(
             content,
             diagram.metadata().clone(),
-        ))
-    } else if let Cow::Owned(content) = sanitized {
-        Cow::Owned(DiagramBlock::with_metadata(
-            content,
-            diagram.metadata().clone(),
-        ))
-    } else {
-        Cow::Borrowed(diagram)
+        )),
+        Cow::Borrowed(_) => Cow::Borrowed(diagram),
     }
 }
 
@@ -761,6 +753,19 @@ mod tests {
     }
 
     #[test]
+    fn test_render_diagram_asciibox_keeps_ampersand() {
+        let block = DiagramBlock::new("graph TD\n  A[Tom & Jerry] --> B".to_string());
+        let options = RenderOptions::new(
+            ThemeMode::Mono,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(80, 24),
+        );
+        let output = render_diagram(&block, options);
+        assert!(output.contains("Tom & Jerry"), "{output}");
+        assert!(!output.contains('﹠'));
+    }
+
+    #[test]
     fn test_render_diagram_asciibox_state_diagram() {
         let block =
             DiagramBlock::new("stateDiagram-v2\n  [*] --> Still\n  Still --> [*]".to_string());
@@ -822,6 +827,12 @@ mod tests {
         }
     }
 
+    /// Délai large pour vérifier qu'un budget accepte de nouveau un rendu : 10 ms ne
+    /// suffisent pas toujours à démarrer un thread sur un runner chargé.
+    fn recovery_limits(limits: ResourceLimits) -> ResourceLimits {
+        limits.with_render_timeout(Some(std::time::Duration::from_secs(5)))
+    }
+
     fn sleeping_render(millis: u64) -> impl FnOnce() -> Result<(), CliError> + Send + 'static {
         move || {
             std::thread::sleep(std::time::Duration::from_millis(millis));
@@ -854,7 +865,10 @@ mod tests {
             .count();
         assert_eq!(refused, 16);
         assert_eq!(wait_until_no_orphan(&budget), 0);
-        assert_eq!(budget.run_with_timeout(|| Ok(1), &limits), Ok(1));
+        assert_eq!(
+            budget.run_with_timeout(|| Ok(1), &recovery_limits(limits)),
+            Ok(1)
+        );
     }
 
     #[test]
@@ -883,7 +897,10 @@ mod tests {
         );
         assert!(matches!(res, Err(CliError::ResourceLimit(_))));
         assert_eq!(wait_until_no_orphan(&budget), 0);
-        assert_eq!(budget.run_with_timeout(|| Ok(7), &limits), Ok(7));
+        assert_eq!(
+            budget.run_with_timeout(|| Ok(7), &recovery_limits(limits)),
+            Ok(7)
+        );
     }
 
     #[test]
