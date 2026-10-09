@@ -6,7 +6,7 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
-## [Non publié]
+## [0.5.1] - 2026-10-10
 
 ### Corrections
 
@@ -87,5 +87,5 @@ rupture de compatibilité incrémente la version mineure.
   limité aux secrets.
 - Preuves de charge `#[ignore]` (`cargo test --release --test stress -- --ignored`).
 
-[Non publié]: https://github.com/ebedy/strmaid/compare/v0.5.0...HEAD
+[0.5.1]: https://github.com/ebedy/strmaid/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ebedy/strmaid/compare/v0.4.0...v0.5.0
