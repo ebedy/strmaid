@@ -745,7 +745,14 @@ mod tests {
     fn test_mcp_validate_reports_timeout_as_tool_error() {
         let limits =
             ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
-        let result = validate_source("flowchart TD\n  A --> B", &limits);
+        // `recv_timeout` consulte le canal avant l'échéance : un diagramme trivial
+        // validé avant ce premier essai passerait sous le délai. 300 arêtes garantissent
+        // un travail largement supérieur au coût de lancement du thread.
+        let chain = (0..=300)
+            .map(|i| format!("N{i}"))
+            .collect::<Vec<_>>()
+            .join(" --> ");
+        let result = validate_source(&format!("flowchart TD\n  {chain}"), &limits);
         assert!(result.is_error);
         assert!(result.content[0].text.contains("délai"));
     }
