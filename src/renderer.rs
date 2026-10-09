@@ -1137,9 +1137,20 @@ mod tests {
         assert_ne!(output, "");
     }
 
+    /// Diagramme dont le rendu dépasse largement le lancement du thread : avec un
+    /// délai de 1 ns, `recv_timeout` ne trouve jamais le résultat déjà disponible.
+    /// La source est propre à ces tests pour ne pas tomber sur une entrée du cache.
+    fn slow_chain_block() -> DiagramBlock {
+        let chain = (0..=100)
+            .map(|i| format!("T{i}"))
+            .collect::<Vec<_>>()
+            .join(" --> ");
+        DiagramBlock::new(format!("graph TD\n  {chain}"))
+    }
+
     #[test]
     fn test_render_diagram_timeout_triggers_fallback() {
-        let block = DiagramBlock::new("graph TD\n  A --> B --> C".to_string());
+        let block = slow_chain_block();
         let limits =
             ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
         let options = RenderOptions::with_limits(
@@ -1156,7 +1167,7 @@ mod tests {
 
     #[test]
     fn test_analyze_and_render_diagram_timeout_reports_error() {
-        let block = DiagramBlock::new("graph TD\n  A --> B".to_string());
+        let block = slow_chain_block();
         let limits =
             ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
         let options = RenderOptions::with_limits(
