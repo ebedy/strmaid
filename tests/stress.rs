@@ -6,10 +6,10 @@
 use serde_json::{Value, json};
 use std::error::Error;
 use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Output, Stdio};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use strmaid::cache::RenderCache;
 use strmaid::domain::{
     DiagramBlock, GraphicsProtocol, ResourceLimits, ThemeMode, ViewportGeometry,
@@ -123,171 +123,179 @@ fn stress_filter_large_document_with_oversized_block() -> TestResult {
     Ok(())
 }
 
-/// Client MCP séquentiel : une requête, une ligne de réponse.
-struct McpClient {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<std::process::ChildStdout>,
-}
+/// Charge MCP : le comptage des threads lit `/proc/<pid>/status`, propre à Linux.
+#[cfg(target_os = "linux")]
+mod mcp_load {
+    use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::process::{Child, ChildStdin};
+    use std::time::Duration;
 
-impl McpClient {
-    fn spawn() -> Result<Self, Box<dyn Error>> {
-        let mut child = Command::new(BIN)
-            .arg("mcp")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdin = child.stdin.take().ok_or("stdin indisponible")?;
-        let stdout = BufReader::new(child.stdout.take().ok_or("stdout indisponible")?);
-        Ok(Self {
-            child,
-            stdin,
-            stdout,
+    /// Client MCP séquentiel : une requête, une ligne de réponse.
+    struct McpClient {
+        child: Child,
+        stdin: ChildStdin,
+        stdout: BufReader<std::process::ChildStdout>,
+    }
+
+    impl McpClient {
+        fn spawn() -> Result<Self, Box<dyn Error>> {
+            let mut child = Command::new(BIN)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()?;
+            let stdin = child.stdin.take().ok_or("stdin indisponible")?;
+            let stdout = BufReader::new(child.stdout.take().ok_or("stdout indisponible")?);
+            Ok(Self {
+                child,
+                stdin,
+                stdout,
+            })
+        }
+
+        fn call(&mut self, request: &Value) -> Result<(Value, Duration), Box<dyn Error>> {
+            let start = Instant::now();
+            writeln!(self.stdin, "{request}")?;
+            self.stdin.flush()?;
+            let mut line = String::new();
+            self.stdout.read_line(&mut line)?;
+            Ok((serde_json::from_str(&line)?, start.elapsed()))
+        }
+
+        /// Nombre de threads du serveur lu dans `/proc` (Linux).
+        fn threads(&self) -> Result<usize, Box<dyn Error>> {
+            let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id()))?;
+            let line = status
+                .lines()
+                .find(|l| l.starts_with("Threads:"))
+                .ok_or("champ Threads absent")?;
+            Ok(line.trim_start_matches("Threads:").trim().parse()?)
+        }
+    }
+
+    impl Drop for McpClient {
+        fn drop(&mut self) {
+            // Arrêt best-effort du serveur : il peut déjà être terminé.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    fn render_request(id: usize, source: &str, timeout_ms: u64) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "strmaid_render",
+                "arguments": { "source": source, "timeout_ms": timeout_ms }
+            }
         })
     }
 
-    fn call(&mut self, request: &Value) -> Result<(Value, Duration), Box<dyn Error>> {
+    fn pathological_source() -> String {
+        (0..5000).fold(String::from("flowchart TD\n"), |mut source, i| {
+            // L'écriture dans une `String` est infaillible.
+            let _ = writeln!(source, "  P{i} --> P{}", (i * 7 + 3) % 5000);
+            source
+        })
+    }
+
+    fn percentile(sorted: &[Duration], pct: usize) -> Duration {
+        let idx = (sorted.len() * pct / 100).min(sorted.len().saturating_sub(1));
+        sorted.get(idx).copied().unwrap_or_default()
+    }
+
+    /// Issue d'une requête légitime : servie, refusée par le plafond d'orphelins, ou autre échec.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Outcome {
+        Served,
+        RefusedByOrphanCap,
+        Failed,
+    }
+
+    fn outcome(response: &Value) -> Outcome {
+        if response["result"]["isError"] != json!(true) {
+            return Outcome::Served;
+        }
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default();
+        if text.contains("rendus abandonnés") {
+            return Outcome::RefusedByOrphanCap;
+        }
+        Outcome::Failed
+    }
+
+    fn legit_request(id: usize) -> Value {
+        render_request(id, &format!("graph TD\n  M{id}A --> M{id}B"), 5000)
+    }
+
+    /// Relance une requête légitime toutes les 100 ms jusqu'à ce qu'elle soit servie.
+    fn wait_for_recovery(client: &mut McpClient) -> Result<Duration, Box<dyn Error>> {
         let start = Instant::now();
-        writeln!(self.stdin, "{request}")?;
-        self.stdin.flush()?;
-        let mut line = String::new();
-        self.stdout.read_line(&mut line)?;
-        Ok((serde_json::from_str(&line)?, start.elapsed()))
-    }
-
-    /// Nombre de threads du serveur lu dans `/proc` (Linux).
-    fn threads(&self) -> Result<usize, Box<dyn Error>> {
-        let status = std::fs::read_to_string(format!("/proc/{}/status", self.child.id()))?;
-        let line = status
-            .lines()
-            .find(|l| l.starts_with("Threads:"))
-            .ok_or("champ Threads absent")?;
-        Ok(line.trim_start_matches("Threads:").trim().parse()?)
-    }
-}
-
-impl Drop for McpClient {
-    fn drop(&mut self) {
-        // Arrêt best-effort du serveur : il peut déjà être terminé.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-fn render_request(id: usize, source: &str, timeout_ms: u64) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "tools/call",
-        "params": {
-            "name": "strmaid_render",
-            "arguments": { "source": source, "timeout_ms": timeout_ms }
+        for attempt in 0..100 {
+            let (response, _) = client.call(&legit_request(10_000 + attempt))?;
+            if outcome(&response) == Outcome::Served {
+                return Ok(start.elapsed());
+            }
+            thread::sleep(Duration::from_millis(100));
         }
-    })
-}
-
-fn pathological_source() -> String {
-    (0..5000).fold(String::from("flowchart TD\n"), |mut source, i| {
-        // L'écriture dans une `String` est infaillible.
-        let _ = writeln!(source, "  P{i} --> P{}", (i * 7 + 3) % 5000);
-        source
-    })
-}
-
-fn percentile(sorted: &[Duration], pct: usize) -> Duration {
-    let idx = (sorted.len() * pct / 100).min(sorted.len().saturating_sub(1));
-    sorted.get(idx).copied().unwrap_or_default()
-}
-
-/// Issue d'une requête légitime : servie, refusée par le plafond d'orphelins, ou autre échec.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Outcome {
-    Served,
-    RefusedByOrphanCap,
-    Failed,
-}
-
-fn outcome(response: &Value) -> Outcome {
-    if response["result"]["isError"] != json!(true) {
-        return Outcome::Served;
+        Err("service non rétabli après 10 s".into())
     }
-    let text = response["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default();
-    if text.contains("rendus abandonnés") {
-        return Outcome::RefusedByOrphanCap;
-    }
-    Outcome::Failed
-}
 
-fn legit_request(id: usize) -> Value {
-    render_request(id, &format!("graph TD\n  M{id}A --> M{id}B"), 5000)
-}
+    #[test]
+    #[ignore = "preuve de charge, exécutée en --release"]
+    fn stress_mcp_sequential_requests_bound_threads() -> TestResult {
+        let limits = ResourceLimits::default();
+        let pathological = pathological_source();
+        let mut client = McpClient::spawn()?;
+        client.call(&json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}))?;
 
-/// Relance une requête légitime toutes les 100 ms jusqu'à ce qu'elle soit servie.
-fn wait_for_recovery(client: &mut McpClient) -> Result<Duration, Box<dyn Error>> {
-    let start = Instant::now();
-    for attempt in 0..100 {
-        let (response, _) = client.call(&legit_request(10_000 + attempt))?;
-        if outcome(&response) == Outcome::Served {
-            return Ok(start.elapsed());
+        let mut latencies = Vec::with_capacity(1000);
+        let mut legit_outcomes = Vec::with_capacity(900);
+        let (mut max_threads, mut pathological_errors) = (0, 0);
+        for id in 1..=1000 {
+            let is_pathological = id % 10 == 0;
+            let request = if is_pathological {
+                render_request(id, &pathological, 100)
+            } else {
+                legit_request(id)
+            };
+            let (response, latency) = client.call(&request)?;
+            latencies.push(latency);
+            if is_pathological {
+                pathological_errors += usize::from(outcome(&response) != Outcome::Served);
+            } else {
+                legit_outcomes.push(outcome(&response));
+            }
+            max_threads = max_threads.max(client.threads()?);
         }
-        thread::sleep(Duration::from_millis(100));
+        let recovery = wait_for_recovery(&mut client)?;
+
+        let count = |kind: Outcome| legit_outcomes.iter().filter(|o| **o == kind).count();
+        latencies.sort_unstable();
+        println!(
+            "mcp 1000 requêtes : p50 {:?}, p99 {:?}, max {:?} ; pathologiques en échec {pathological_errors}/100 ; \
+             légitimes servies {}, refusées par plafond {}, autres échecs {} ; pic de threads {max_threads} ; \
+             service rétabli en {recovery:?}",
+            percentile(&latencies, 50),
+            percentile(&latencies, 99),
+            latencies.last().copied().unwrap_or_default(),
+            count(Outcome::Served),
+            count(Outcome::RefusedByOrphanCap),
+            count(Outcome::Failed),
+        );
+        assert_eq!(pathological_errors, 100);
+        assert_eq!(
+            count(Outcome::Failed),
+            0,
+            "seul le plafond peut refuser une requête légitime"
+        );
+        // Fil principal + rendus orphelins plafonnés + un rendu légitime encore en cours de sortie.
+        assert!(max_threads <= limits.max_orphan_renders + 2);
+        Ok(())
     }
-    Err("service non rétabli après 10 s".into())
-}
-
-#[test]
-#[cfg(target_os = "linux")]
-#[ignore = "preuve de charge, exécutée en --release"]
-fn stress_mcp_sequential_requests_bound_threads() -> TestResult {
-    let limits = ResourceLimits::default();
-    let pathological = pathological_source();
-    let mut client = McpClient::spawn()?;
-    client.call(&json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {}}))?;
-
-    let mut latencies = Vec::with_capacity(1000);
-    let mut legit_outcomes = Vec::with_capacity(900);
-    let (mut max_threads, mut pathological_errors) = (0, 0);
-    for id in 1..=1000 {
-        let is_pathological = id % 10 == 0;
-        let request = if is_pathological {
-            render_request(id, &pathological, 100)
-        } else {
-            legit_request(id)
-        };
-        let (response, latency) = client.call(&request)?;
-        latencies.push(latency);
-        if is_pathological {
-            pathological_errors += usize::from(outcome(&response) != Outcome::Served);
-        } else {
-            legit_outcomes.push(outcome(&response));
-        }
-        max_threads = max_threads.max(client.threads()?);
-    }
-    let recovery = wait_for_recovery(&mut client)?;
-
-    let count = |kind: Outcome| legit_outcomes.iter().filter(|o| **o == kind).count();
-    latencies.sort_unstable();
-    println!(
-        "mcp 1000 requêtes : p50 {:?}, p99 {:?}, max {:?} ; pathologiques en échec {pathological_errors}/100 ; \
-         légitimes servies {}, refusées par plafond {}, autres échecs {} ; pic de threads {max_threads} ; \
-         service rétabli en {recovery:?}",
-        percentile(&latencies, 50),
-        percentile(&latencies, 99),
-        latencies.last().copied().unwrap_or_default(),
-        count(Outcome::Served),
-        count(Outcome::RefusedByOrphanCap),
-        count(Outcome::Failed),
-    );
-    assert_eq!(pathological_errors, 100);
-    assert_eq!(
-        count(Outcome::Failed),
-        0,
-        "seul le plafond peut refuser une requête légitime"
-    );
-    // Fil principal + rendus orphelins plafonnés + un rendu légitime encore en cours de sortie.
-    assert!(max_threads <= limits.max_orphan_renders + 2);
-    Ok(())
 }
