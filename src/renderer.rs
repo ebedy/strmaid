@@ -827,6 +827,12 @@ mod tests {
         }
     }
 
+    /// Délai large pour vérifier qu'un budget accepte de nouveau un rendu : 10 ms ne
+    /// suffisent pas toujours à démarrer un thread sur un runner chargé.
+    fn recovery_limits(limits: ResourceLimits) -> ResourceLimits {
+        limits.with_render_timeout(Some(std::time::Duration::from_secs(5)))
+    }
+
     fn sleeping_render(millis: u64) -> impl FnOnce() -> Result<(), CliError> + Send + 'static {
         move || {
             std::thread::sleep(std::time::Duration::from_millis(millis));
@@ -859,7 +865,10 @@ mod tests {
             .count();
         assert_eq!(refused, 16);
         assert_eq!(wait_until_no_orphan(&budget), 0);
-        assert_eq!(budget.run_with_timeout(|| Ok(1), &limits), Ok(1));
+        assert_eq!(
+            budget.run_with_timeout(|| Ok(1), &recovery_limits(limits)),
+            Ok(1)
+        );
     }
 
     #[test]
@@ -888,7 +897,10 @@ mod tests {
         );
         assert!(matches!(res, Err(CliError::ResourceLimit(_))));
         assert_eq!(wait_until_no_orphan(&budget), 0);
-        assert_eq!(budget.run_with_timeout(|| Ok(7), &limits), Ok(7));
+        assert_eq!(
+            budget.run_with_timeout(|| Ok(7), &recovery_limits(limits)),
+            Ok(7)
+        );
     }
 
     #[test]
