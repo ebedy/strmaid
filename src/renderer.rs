@@ -144,26 +144,18 @@ fn prepare_diagram_for_rendering(
     diagram: &DiagramBlock,
     options: RenderOptions,
 ) -> Cow<'_, DiagramBlock> {
-    let sanitized = mermaid::sanitize_mermaid_labels(diagram.as_str());
+    // La neutralisation des esperluettes reste propre au chemin SVG
+    // (`render_to_svg_detailed_with_engine`) : `mermaid-text` lit `&` sans dislocation.
     let target_cols = options.viewport.columns.max(10);
-    let adapted = if options.auto_orient {
-        mermaid::adapt_direction_for_viewport(&sanitized, target_cols)
-    } else {
-        Cow::Borrowed(sanitized.as_ref())
-    };
-
-    if let Cow::Owned(content) = adapted {
-        Cow::Owned(DiagramBlock::with_metadata(
+    if !options.auto_orient {
+        return Cow::Borrowed(diagram);
+    }
+    match mermaid::adapt_direction_for_viewport(diagram.as_str(), target_cols) {
+        Cow::Owned(content) => Cow::Owned(DiagramBlock::with_metadata(
             content,
             diagram.metadata().clone(),
-        ))
-    } else if let Cow::Owned(content) = sanitized {
-        Cow::Owned(DiagramBlock::with_metadata(
-            content,
-            diagram.metadata().clone(),
-        ))
-    } else {
-        Cow::Borrowed(diagram)
+        )),
+        Cow::Borrowed(_) => Cow::Borrowed(diagram),
     }
 }
 
@@ -758,6 +750,19 @@ mod tests {
         assert!(output.contains('A'));
         assert!(output.contains('B'));
         assert!(output.chars().any(|c| c == '┌' || c == '│' || c == '└'));
+    }
+
+    #[test]
+    fn test_render_diagram_asciibox_keeps_ampersand() {
+        let block = DiagramBlock::new("graph TD\n  A[Tom & Jerry] --> B".to_string());
+        let options = RenderOptions::new(
+            ThemeMode::Mono,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(80, 24),
+        );
+        let output = render_diagram(&block, options);
+        assert!(output.contains("Tom & Jerry"), "{output}");
+        assert!(!output.contains('﹠'));
     }
 
     #[test]
