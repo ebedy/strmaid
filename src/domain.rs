@@ -198,19 +198,6 @@ pub struct JsonDocumentOutput {
     pub summary: JsonStreamSummary,
 }
 
-impl GraphicsProtocol {
-    #[must_use]
-    pub fn from_str_name(name: &str) -> Option<Self> {
-        match name.to_ascii_lowercase().as_str() {
-            "kitty" => Some(Self::Kitty),
-            "halfblock" | "halfblocks" => Some(Self::HalfBlocks),
-            "ascii" | "asciibox" => Some(Self::AsciiBox),
-            "raw" => Some(Self::Raw),
-            _ => None,
-        }
-    }
-}
-
 /// Mode d'exécution de l'outil CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -225,6 +212,8 @@ pub struct ResourceLimits {
     pub max_raster_pixels: u32,
     pub max_pager_lines: usize,
     pub max_cached_diagrams: usize,
+    /// Budget en octets du cache de rendu (contenu source et payload cumulés).
+    pub max_cache_bytes: usize,
     pub render_timeout: Option<Duration>,
     /// Nombre maximal de rendus abandonnés après expiration de `render_timeout` et
     /// encore en cours (les moteurs ne sont pas interruptibles) ; au-delà, tout nouveau
@@ -239,6 +228,7 @@ impl Default for ResourceLimits {
             max_raster_pixels: 8_000_000,
             max_pager_lines: 20_000,
             max_cached_diagrams: 32,
+            max_cache_bytes: 32 * 1_048_576,
             render_timeout: Some(Duration::from_millis(5000)),
             max_orphan_renders: 4,
         }
@@ -532,12 +522,6 @@ fn extract_mermaid_content_and_meta(input: &str) -> (String, DiagramMetadata) {
     (content.join("\n").trim().to_string(), metadata)
 }
 
-/// Élimine les sentinelles Markdown éventuelles entourant une spécification Mermaid.
-#[must_use]
-pub fn strip_mermaid_fences(input: &str) -> String {
-    extract_mermaid_content_and_meta(input).0
-}
-
 /// Image matricielle RGBA prête pour l'affichage terminal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterizedImage {
@@ -634,7 +618,7 @@ enum EscapePolicy {
 }
 
 impl EscapePolicy {
-    const fn allows(self, kind: SegmentKind) -> bool {
+    fn allows(self, kind: SegmentKind) -> bool {
         match (self, kind) {
             (_, SegmentKind::Char(ch)) => !is_unsafe_terminal_char(ch),
             (Self::KeepSgr, SegmentKind::Sgr) => true,
@@ -644,7 +628,7 @@ impl EscapePolicy {
 }
 
 /// Caractère de contrôle C0, DEL ou C1 interprétable par un terminal (hors `\n` et `\t`).
-const fn is_unsafe_terminal_char(ch: char) -> bool {
+fn is_unsafe_terminal_char(ch: char) -> bool {
     ch.is_control() && ch != '\n' && ch != '\t'
 }
 
@@ -966,18 +950,15 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_mermaid_fences() {
-        let raw1 = "```mermaid\ngraph TD\n  A --> B\n```";
-        assert_eq!(strip_mermaid_fences(raw1), "graph TD\n  A --> B");
-
-        let raw2 = "graph TD\n  A --> B";
-        assert_eq!(strip_mermaid_fences(raw2), "graph TD\n  A --> B");
-
-        let raw3 = "```\ngraph TD\n  A --> B\n```";
-        assert_eq!(strip_mermaid_fences(raw3), "graph TD\n  A --> B");
-
-        let block = DiagramBlock::from_raw(raw1);
-        assert_eq!(block.as_str(), "graph TD\n  A --> B");
+    fn test_diagram_block_from_raw_strips_fences() {
+        let expected = "graph TD\n  A --> B";
+        for raw in [
+            "```mermaid\ngraph TD\n  A --> B\n```",
+            "graph TD\n  A --> B",
+            "```\ngraph TD\n  A --> B\n```",
+        ] {
+            assert_eq!(DiagramBlock::from_raw(raw).as_str(), expected);
+        }
     }
 
     #[test]

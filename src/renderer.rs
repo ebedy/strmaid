@@ -507,11 +507,11 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
         effective_options.engine,
     );
 
-    if let Some((cached_payload, is_valid)) = RenderCache::global().get(&cache_key) {
+    if let Some(cached_payload) = RenderCache::global().get(&cache_key) {
         let title_prefix = diagram.title().map_or_else(String::new, |t| {
             format_title_header(t, effective_options.viewport.columns)
         });
-        return (format!("{title_prefix}{cached_payload}"), is_valid);
+        return (format!("{title_prefix}{cached_payload}"), true);
     }
 
     let diag_for_render = diagram.clone();
@@ -535,9 +535,9 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
     );
 
     match render_result {
-        Ok((output, is_valid, raw_payload)) => {
-            if is_valid {
-                RenderCache::global().insert(cache_key, (raw_payload, true));
+        Ok((output, is_valid, cacheable_payload)) => {
+            if let Some(payload) = cacheable_payload {
+                RenderCache::global().insert(cache_key, payload);
             }
             (output, is_valid)
         }
@@ -545,11 +545,15 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
     }
 }
 
+/// Rendu de repli `AsciiBox` après un échec graphique.
+///
+/// Jamais mis en cache : l'échec dépend de `ResourceLimits`, absentes de `RenderCacheKey`,
+/// et l'avertissement doit accompagner chaque rendu.
 fn render_asciibox_fallback(
     diagram: &DiagramBlock,
     options: RenderOptions,
     original_err: &CliError,
-) -> (String, bool, String) {
+) -> (String, bool, Option<String>) {
     let target_cols = options.viewport.columns.max(10);
     let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
     match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
@@ -562,26 +566,26 @@ fn render_asciibox_fallback(
                 "\x1b[33m⚠️  [Rendu graphique indisponible: {}; repli automatique en mode AsciiBox]\x1b[0m\n",
                 sanitize_terminal_text(&error_text)
             );
-            (format!("{warning}{title_prefix}{text}"), true, text)
+            (format!("{warning}{title_prefix}{text}"), true, None)
         }
-        Err(_) => (format_fallback(diagram, original_err), false, String::new()),
+        Err(_) => (format_fallback(diagram, original_err), false, None),
     }
 }
 
 fn render_graphical_with_fallback(
     diagram: &DiagramBlock,
     options: RenderOptions,
-) -> (String, bool, String) {
+) -> (String, bool, Option<String>) {
     let render_result = mermaid::render_to_svg_with_engine(diagram, options.theme, options.engine)
         .and_then(|svg| render_svg_to_terminal_with_raw(&svg, diagram, options));
 
     match render_result {
-        Ok((output, raw_payload)) => (output, true, raw_payload),
+        Ok((output, raw_payload)) => (output, true, Some(raw_payload)),
         Err(err) => {
             if options.fallback_asciibox && !matches!(err, CliError::MermaidSyntax(_)) {
                 render_asciibox_fallback(diagram, options, &err)
             } else {
-                (format_fallback(diagram, &err), false, String::new())
+                (format_fallback(diagram, &err), false, None)
             }
         }
     }
@@ -590,7 +594,7 @@ fn render_graphical_with_fallback(
 fn render_asciibox_to_terminal(
     diagram: &DiagramBlock,
     options: RenderOptions,
-) -> (String, bool, String) {
+) -> (String, bool, Option<String>) {
     let target_cols = options.viewport.columns.max(10);
     let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
 
@@ -599,11 +603,11 @@ fn render_asciibox_to_terminal(
             let title_prefix = diagram
                 .title()
                 .map_or_else(String::new, |t| format_title_header(t, target_cols));
-            (format!("{title_prefix}{text}"), true, text)
+            (format!("{title_prefix}{text}"), true, Some(text))
         }
         Err(err_detail) => {
             let cli_err = CliError::MermaidSyntax(err_detail.message);
-            (format_fallback(diagram, &cli_err), false, String::new())
+            (format_fallback(diagram, &cli_err), false, None)
         }
     }
 }
@@ -691,7 +695,11 @@ fn encode_image_for_protocol(
         GraphicsProtocol::Kitty => kitty::encode_kitty_graphics(image),
         GraphicsProtocol::Iterm2 => iterm2::encode_iterm2(image)?,
         GraphicsProtocol::HalfBlocks => halfblock::encode_halfblocks(image, target_cols),
-        GraphicsProtocol::AsciiBox => asciibox::encode_asciibox(image, target_cols),
+        GraphicsProtocol::AsciiBox => {
+            return Err(CliError::ImageEncoding(
+                "AsciiBox est un rendu textuel sans image matricielle".to_string(),
+            ));
+        }
         GraphicsProtocol::Raw => String::new(),
     })
 }
@@ -887,6 +895,20 @@ mod tests {
             Ok("inline")
         );
         assert_eq!(budget.orphans(), 0);
+    }
+
+    #[test]
+    fn test_encode_image_for_protocol_rejects_asciibox() {
+        let image = RasterizedImage::new(1, 1, vec![0, 0, 0, 255]);
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(80, 24),
+        );
+        assert!(matches!(
+            encode_image_for_protocol(&image, options),
+            Err(CliError::ImageEncoding(_))
+        ));
     }
 
     #[test]
@@ -1115,9 +1137,20 @@ mod tests {
         assert_ne!(output, "");
     }
 
+    /// Diagramme dont le rendu dépasse largement le lancement du thread : avec un
+    /// délai de 1 ns, `recv_timeout` ne trouve jamais le résultat déjà disponible.
+    /// La source est propre à ces tests pour ne pas tomber sur une entrée du cache.
+    fn slow_chain_block() -> DiagramBlock {
+        let chain = (0..=100)
+            .map(|i| format!("T{i}"))
+            .collect::<Vec<_>>()
+            .join(" --> ");
+        DiagramBlock::new(format!("graph TD\n  {chain}"))
+    }
+
     #[test]
     fn test_render_diagram_timeout_triggers_fallback() {
-        let block = DiagramBlock::new("graph TD\n  A --> B --> C".to_string());
+        let block = slow_chain_block();
         let limits =
             ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
         let options = RenderOptions::with_limits(
@@ -1134,7 +1167,7 @@ mod tests {
 
     #[test]
     fn test_analyze_and_render_diagram_timeout_reports_error() {
-        let block = DiagramBlock::new("graph TD\n  A --> B".to_string());
+        let block = slow_chain_block();
         let limits =
             ResourceLimits::default().with_render_timeout(Some(std::time::Duration::from_nanos(1)));
         let options = RenderOptions::with_limits(
@@ -1174,6 +1207,57 @@ mod tests {
         assert!(output.contains("repli automatique en mode AsciiBox"));
         assert!(output.contains("RasterLimitA"));
         assert!(output.contains("RasterLimitB"));
+    }
+
+    #[test]
+    fn test_render_diagram_fallback_warning_survives_second_render() {
+        let block =
+            DiagramBlock::new("graph TD\n  RepeatFallbackA --> RepeatFallbackB".to_string());
+        let limits = ResourceLimits {
+            max_raster_pixels: 1,
+            ..ResourceLimits::default()
+        };
+        let options = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            limits,
+        );
+
+        let (first, _) = render_diagram_checked(&block, options);
+        let (second, valid) = render_diagram_checked(&block, options);
+
+        assert!(valid);
+        assert!(first.contains("repli automatique en mode AsciiBox"));
+        assert!(second.contains("repli automatique en mode AsciiBox"));
+    }
+
+    #[test]
+    fn test_render_diagram_fallback_does_not_leak_into_default_limits() {
+        let block = DiagramBlock::new("graph TD\n  LeakFallbackA --> LeakFallbackB".to_string());
+        let constrained = RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            ResourceLimits {
+                max_raster_pixels: 1,
+                ..ResourceLimits::default()
+            },
+        );
+        let default_options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+        );
+
+        let _ = render_diagram_checked(&block, constrained);
+        let (output, valid) = render_diagram_checked(&block, default_options);
+
+        assert!(valid);
+        assert!(
+            !output.contains("LeakFallbackA"),
+            "rendu AsciiBox servi depuis le cache"
+        );
     }
 
     #[test]
