@@ -6,7 +6,7 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
-## [0.5.1] - 2026-10-09
+## [0.5.1] - 2026-10-10
 
 ### Corrections
 
