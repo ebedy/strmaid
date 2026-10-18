@@ -1,4 +1,5 @@
 use crate::domain::DiagramErrorDetail;
+use crate::mermaid::split_frontmatter;
 use mermaid_text::{
     Error as MermaidTextError, RenderOptions as MtRenderOptions, render_with_options,
 };
@@ -28,7 +29,8 @@ impl AsciiBoxOptions {
 /// Rendu sémantique d'un diagramme Mermaid en texte Unicode Box-Drawing calibré au terminal.
 ///
 /// # Errors
-/// Renvoie `DiagramErrorDetail` si la syntaxe Mermaid est invalide ou non supportée.
+/// Renvoie `DiagramErrorDetail` si la syntaxe Mermaid est invalide ou non supportée, ou
+/// (`kind: TooWide`) si le rendu dépasse `options.target_cols` même après compactage.
 pub fn render_asciibox(
     source: &str,
     options: AsciiBoxOptions,
@@ -36,13 +38,14 @@ pub fn render_asciibox(
     let budget = usize::from(options.target_cols.max(10));
     let opts = MtRenderOptions {
         max_width: Some(budget),
-        max_width_strict: false,
+        max_width_strict: true,
         color: options.color,
         ascii: false,
         ..MtRenderOptions::default()
     };
 
-    render_with_options(&adapt_for_mermaid_text(source), &opts).map_err(map_mermaid_text_error)
+    let (_frontmatter, body) = split_frontmatter(source);
+    render_with_options(&adapt_for_mermaid_text(body), &opts).map_err(map_mermaid_text_error)
 }
 
 /// Compense deux écarts de `mermaid-text` 0.57 avec Mermaid sur les flowcharts : les
@@ -189,6 +192,7 @@ fn map_mermaid_text_error(err: MermaidTextError) -> DiagramErrorDetail {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::display_width;
 
     #[test]
     fn test_render_asciibox_valid_flowchart() {
@@ -199,6 +203,66 @@ mod tests {
         assert!(rendered.contains("Build"));
         assert!(rendered.contains("Deploy"));
         assert!(rendered.chars().any(|c| c == '┌' || c == '│' || c == '└'));
+    }
+
+    #[test]
+    fn test_render_asciibox_ignores_leading_frontmatter() {
+        let opts = AsciiBoxOptions::new(80, false);
+        let source = "---\ntitle: Demo\n---\nflowchart TD\n    A[Start] --> B[End]";
+        let rendered = render_asciibox(source, opts).unwrap_or_default();
+        assert!(rendered.contains("Start"), "rendu absent : {rendered:?}");
+        assert!(rendered.contains("End"));
+    }
+
+    #[test]
+    fn test_render_asciibox_frontmatter_matches_plain_rendering() {
+        let opts = AsciiBoxOptions::new(80, false);
+        let body = "sequenceDiagram\n    Alice->>Bob: Hello";
+        let with_frontmatter = render_asciibox(&format!("---\ntitle: Demo\n---\n{body}"), opts);
+        assert_eq!(with_frontmatter, render_asciibox(body, opts));
+        assert!(with_frontmatter.is_ok());
+    }
+
+    #[test]
+    fn test_render_asciibox_unclosed_frontmatter_is_not_stripped() {
+        let opts = AsciiBoxOptions::new(80, false);
+        let result = render_asciibox("---\ntitle: Demo\nflowchart TD\n    A --> B", opts);
+        assert!(result.is_err());
+    }
+
+    const WIDTH_SOURCES: [&str; 5] = [
+        "graph LR\n  Alpha --> Beta --> Gamma --> Delta --> Epsilon --> Zeta",
+        "sequenceDiagram\n  participant Développeur\n  participant Agent\n  participant Outil\n  Développeur->>Agent: Prompt avec demande de schéma\n  Agent->>Outil: Flux Markdown",
+        "gantt\n  title Planification du projet\n  dateFormat YYYY-MM-DD\n  section Phase\n  Tâche une :a1, 2026-01-01, 30d",
+        "timeline\n  title Historique des versions\n  2024 : Une première version\n  2025 : Une deuxième version",
+        "pie title Répartition\n  \"Un libellé assez long\" : 40\n  \"Un autre libellé\" : 60",
+    ];
+
+    #[test]
+    fn test_render_asciibox_never_exceeds_requested_width() {
+        for source in WIDTH_SOURCES {
+            for cols in [20_u16, 40, 80] {
+                let Ok(rendered) = render_asciibox(source, AsciiBoxOptions::new(cols, false))
+                else {
+                    continue;
+                };
+                let widest = rendered.lines().map(display_width).max().unwrap_or(0);
+                assert!(
+                    widest <= usize::from(cols),
+                    "{widest} > {cols} colonnes pour {source:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_render_asciibox_too_wide_reports_dedicated_error() {
+        let source = WIDTH_SOURCES[0];
+        let err = render_asciibox(source, AsciiBoxOptions::new(20, false))
+            .err()
+            .unwrap_or_else(|| DiagramErrorDetail::new(String::new(), None, None));
+        assert_eq!(err.kind.as_deref(), Some("TooWide"), "{err:?}");
+        assert!(err.message.contains("20"), "{}", err.message);
     }
 
     #[test]

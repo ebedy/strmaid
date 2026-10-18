@@ -14,7 +14,7 @@ struct Fixture {
     single_block: bool,
 }
 
-const FIXTURES: [Fixture; 9] = [
+const FIXTURES: [Fixture; 10] = [
     Fixture {
         name: "backticks avec titre",
         input: "```mermaid title=\"T\"\ngraph TD\n  A --> B\n```\n",
@@ -64,6 +64,12 @@ const FIXTURES: [Fixture; 9] = [
         single_block: false,
     },
     Fixture {
+        name: "langage en majuscules",
+        input: "```Mermaid\ngraph TD\n  A --> B\n```\n",
+        expected: Some(("graph TD\n  A --> B", None)),
+        single_block: true,
+    },
+    Fixture {
         name: "bloc rust",
         input: "```rust\nfn main() {}\n```\n",
         expected: None,
@@ -82,7 +88,10 @@ fn stream_diagrams(input: &str) -> Vec<DiagramBlock> {
         .into_iter()
         .filter_map(|item| match item {
             StreamItem::Diagram(block) => Some(block),
-            StreamItem::Text(_) | StreamItem::OversizedDiagram { .. } => None,
+            StreamItem::Text(_)
+            | StreamItem::TextFragment(_)
+            | StreamItem::OversizedDiagram { .. }
+            | StreamItem::UnclosedDiagram { .. } => None,
         })
         .collect()
 }

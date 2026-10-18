@@ -9,6 +9,9 @@ pub struct LossyLine {
     pub text: String,
     /// Indique qu'au moins un octet invalide a été remplacé.
     pub had_invalid_utf8: bool,
+    /// Indique que la ligne physique se poursuit dans le segment suivant (segment lu
+    /// par `LossyLines::with_segment_bytes` à la limite de taille, sans `\n`).
+    pub continues: bool,
 }
 
 /// Itérateur de lignes tolérant aux octets non UTF-8, à la différence de
@@ -17,13 +20,22 @@ pub struct LossyLines<R> {
     reader: R,
     buffer: Vec<u8>,
     max_line_bytes: Option<usize>,
+    segment_bytes: Option<usize>,
 }
+
+/// Plus longue séquence UTF-8 : plancher de la taille de segment, pour garantir la progression.
+const MIN_SEGMENT_BYTES: usize = 4;
 
 /// Résultat brut de la lecture d'une ligne.
 enum RawLine {
     Eof,
     Complete,
-    Oversized { bytes: usize, limit: usize },
+    /// Segment sans `\n` lu à la limite de taille ; la ligne se poursuit.
+    Partial(Vec<u8>),
+    Oversized {
+        bytes: usize,
+        limit: usize,
+    },
 }
 
 impl<R: BufRead> LossyLines<R> {
@@ -33,6 +45,20 @@ impl<R: BufRead> LossyLines<R> {
             reader,
             buffer: Vec::new(),
             max_line_bytes: None,
+            segment_bytes: None,
+        }
+    }
+
+    /// Variante sans perte : une ligne plus longue que `max_segment_bytes` est restituée en
+    /// segments successifs (`LossyLine::continues`), coupés hors des séquences UTF-8, de
+    /// sorte que la mémoire reste bornée quelle que soit la longueur de la ligne.
+    #[must_use]
+    pub const fn with_segment_bytes(reader: R, max_segment_bytes: usize) -> Self {
+        Self {
+            reader,
+            buffer: Vec::new(),
+            max_line_bytes: None,
+            segment_bytes: Some(max_segment_bytes),
         }
     }
 
@@ -45,10 +71,32 @@ impl<R: BufRead> LossyLines<R> {
             reader,
             buffer: Vec::new(),
             max_line_bytes: Some(max_line_bytes),
+            segment_bytes: None,
         }
     }
 
+    fn read_segment(&mut self, max_segment_bytes: usize) -> io::Result<RawLine> {
+        let max = max_segment_bytes.max(MIN_SEGMENT_BYTES);
+        let limit = u64::try_from(max).unwrap_or(u64::MAX);
+        let read = (&mut self.reader)
+            .take(limit)
+            .read_until(b'\n', &mut self.buffer)?;
+        if read == 0 && self.buffer.is_empty() {
+            return Ok(RawLine::Eof);
+        }
+        if read < max || self.buffer.last() == Some(&b'\n') {
+            return Ok(RawLine::Complete);
+        }
+        let tail = self
+            .buffer
+            .split_off(incomplete_utf8_tail_start(&self.buffer));
+        Ok(RawLine::Partial(mem::replace(&mut self.buffer, tail)))
+    }
+
     fn read_raw_line(&mut self) -> io::Result<RawLine> {
+        if let Some(max) = self.segment_bytes {
+            return self.read_segment(max);
+        }
         let Some(max) = self.max_line_bytes else {
             let read = self.reader.read_until(b'\n', &mut self.buffer)?;
             return Ok(if read == 0 {
@@ -82,7 +130,10 @@ impl<R: BufRead> Iterator for LossyLines<R> {
     fn next(&mut self) -> Option<Self::Item> {
         match self.read_raw_line() {
             Ok(RawLine::Eof) => None,
-            Ok(RawLine::Complete) => Some(Ok(decode_lossy_line(mem::take(&mut self.buffer)))),
+            Ok(RawLine::Complete) => {
+                Some(Ok(decode_lossy_line(mem::take(&mut self.buffer), false)))
+            }
+            Ok(RawLine::Partial(bytes)) => Some(Ok(decode_lossy_line(bytes, true))),
             Ok(RawLine::Oversized { bytes, limit }) => Some(Err(CliError::ResourceLimit(format!(
                 "ligne d'entrée de {bytes} octets supérieure à la limite de {limit} octets"
             )))),
@@ -114,7 +165,15 @@ fn drain_until_newline<R: BufRead>(reader: &mut R) -> io::Result<usize> {
     }
 }
 
-fn decode_lossy_line(mut bytes: Vec<u8>) -> LossyLine {
+/// Début d'une séquence UTF-8 tronquée en fin de `bytes` (`bytes.len()` si la fin est complète).
+fn incomplete_utf8_tail_start(bytes: &[u8]) -> usize {
+    match std::str::from_utf8(bytes) {
+        Err(err) if err.error_len().is_none() => err.valid_up_to(),
+        _ => bytes.len(),
+    }
+}
+
+fn decode_lossy_line(mut bytes: Vec<u8>, continues: bool) -> LossyLine {
     if bytes.last() == Some(&b'\n') {
         bytes.pop();
     }
@@ -122,10 +181,12 @@ fn decode_lossy_line(mut bytes: Vec<u8>) -> LossyLine {
         Ok(text) => LossyLine {
             text,
             had_invalid_utf8: false,
+            continues,
         },
         Err(err) => LossyLine {
             text: String::from_utf8_lossy(err.as_bytes()).into_owned(),
             had_invalid_utf8: true,
+            continues,
         },
     }
 }
@@ -145,12 +206,30 @@ pub fn report_invalid_utf8_once(line: &LossyLine, already_reported: bool) -> boo
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamItem {
     Text(String),
+    /// Début ou milieu d'une ligne dépassant `ResourceLimits::max_line_bytes`, à relayer
+    /// sans saut de ligne ; le dernier segment de la ligne arrive en `Text`.
+    TextFragment(String),
     Diagram(DiagramBlock),
     /// Bloc Mermaid ignoré car son contenu dépasse `ResourceLimits::max_diagram_bytes`.
     /// Le contenu n'est pas conservé ; seul son volume est rapporté.
     OversizedDiagram {
         skipped_bytes: usize,
     },
+    /// Bloc Mermaid dont la clôture n'est jamais arrivée : le flux s'est terminé en cours de
+    /// capture. Le contenu est conservé pour être restitué avec un avertissement.
+    UnclosedDiagram {
+        opening_fence: String,
+        content: String,
+    },
+}
+
+/// Texte d'un bloc non fermé tel que reçu : balise d'ouverture puis contenu.
+#[must_use]
+pub fn unclosed_block_text(opening_fence: &str, content: &str) -> String {
+    if content.is_empty() {
+        return opening_fence.to_string();
+    }
+    format!("{opening_fence}\n{content}")
 }
 
 /// Bloc Mermaid en cours d'accumulation.
@@ -167,8 +246,11 @@ impl DiagramCapture {
         DiagramBlock::with_metadata(self.buffer.join("\n"), self.fence.metadata())
     }
 
-    fn into_unclosed_text(self) -> String {
-        format!("{}\n{}", self.opening_fence, self.buffer.join("\n"))
+    fn into_unclosed_item(self) -> StreamItem {
+        StreamItem::UnclosedDiagram {
+            opening_fence: self.opening_fence,
+            content: self.buffer.join("\n"),
+        }
     }
 }
 
@@ -196,6 +278,8 @@ struct OversizedSkip {
 pub struct StreamStateMachine {
     state: State,
     limits: ResourceLimits,
+    /// Une ligne plus longue que `max_line_bytes` est en cours de relais.
+    mid_line: bool,
 }
 
 impl Default for StreamStateMachine {
@@ -215,7 +299,16 @@ impl StreamStateMachine {
         Self {
             state: State::Passthrough,
             limits,
+            mid_line: false,
         }
+    }
+
+    /// Traite un segment issu de `LossyLines::with_segment_bytes`.
+    pub fn process_segment(&mut self, line: &LossyLine) -> Option<StreamItem> {
+        if line.continues {
+            return self.process_fragment(&line.text);
+        }
+        self.process_line(&line.text)
     }
 
     /// Traite une ligne entrante et retourne un élément si disponible.
@@ -224,11 +317,60 @@ impl StreamStateMachine {
     /// drainé puis signalé par `StreamItem::OversizedDiagram`.
     pub fn process_line(&mut self, line: &str) -> Option<StreamItem> {
         let sanitized = line.strip_suffix('\r').unwrap_or(line);
+        if mem::take(&mut self.mid_line) {
+            return self.process_line_tail(sanitized);
+        }
         match mem::replace(&mut self.state, State::Passthrough) {
             State::Passthrough => self.process_passthrough(sanitized),
             State::InForeignFence(fence) => Some(self.process_foreign(sanitized, fence)),
             State::CapturingDiagram(capture) => self.process_capture(sanitized, capture),
             State::SkippingOversizedDiagram(skip) => self.process_skip(sanitized, skip),
+        }
+    }
+
+    /// Segment non terminal d'une ligne dépassant `max_line_bytes`. Une telle ligne n'ouvre
+    /// ni ne ferme jamais de bloc ; dans un diagramme, elle le fait basculer en hors quota.
+    fn process_fragment(&mut self, fragment: &str) -> Option<StreamItem> {
+        self.mid_line = true;
+        match mem::replace(&mut self.state, State::Passthrough) {
+            State::Passthrough => Some(StreamItem::TextFragment(fragment.to_string())),
+            State::InForeignFence(fence) => {
+                self.state = State::InForeignFence(fence);
+                Some(StreamItem::TextFragment(fragment.to_string()))
+            }
+            State::CapturingDiagram(capture) => {
+                self.skip_remaining(capture.fence, capture.bytes_used, fragment);
+                None
+            }
+            State::SkippingOversizedDiagram(skip) => {
+                self.skip_remaining(skip.fence, skip.skipped_bytes, fragment);
+                None
+            }
+        }
+    }
+
+    fn skip_remaining(&mut self, fence: CodeFence, skipped_bytes: usize, fragment: &str) {
+        self.state = State::SkippingOversizedDiagram(OversizedSkip {
+            fence,
+            skipped_bytes: skipped_bytes.saturating_add(fragment.len()),
+        });
+    }
+
+    /// Dernier segment d'une ligne dépassant `max_line_bytes` : relayé tel quel, sans
+    /// reconnaissance de balise, puis le traitement normal reprend à la ligne suivante.
+    fn process_line_tail(&mut self, tail: &str) -> Option<StreamItem> {
+        match mem::replace(&mut self.state, State::Passthrough) {
+            State::Passthrough => Some(StreamItem::Text(tail.to_string())),
+            State::InForeignFence(fence) => {
+                self.state = State::InForeignFence(fence);
+                Some(StreamItem::Text(tail.to_string()))
+            }
+            State::SkippingOversizedDiagram(mut skip) => {
+                skip.skipped_bytes = accumulate_line_bytes(skip.skipped_bytes, tail);
+                self.state = State::SkippingOversizedDiagram(skip);
+                None
+            }
+            State::CapturingDiagram(capture) => self.process_capture(tail, capture),
         }
     }
 
@@ -292,11 +434,12 @@ impl StreamStateMachine {
 
     /// Finalise le flux à la réception d'EOF.
     pub fn finish(&mut self) -> Option<StreamItem> {
+        let unterminated_long_line = mem::take(&mut self.mid_line);
         match mem::replace(&mut self.state, State::Passthrough) {
-            State::Passthrough | State::InForeignFence(_) => None,
-            State::CapturingDiagram(capture) => {
-                Some(StreamItem::Text(capture.into_unclosed_text()))
+            State::Passthrough | State::InForeignFence(_) => {
+                unterminated_long_line.then(|| StreamItem::Text(String::new()))
             }
+            State::CapturingDiagram(capture) => Some(capture.into_unclosed_item()),
             State::SkippingOversizedDiagram(skip) => Some(StreamItem::OversizedDiagram {
                 skipped_bytes: skip.skipped_bytes,
             }),
@@ -351,7 +494,10 @@ mod tests {
         let eof = machine.finish();
         assert_eq!(
             eof,
-            Some(StreamItem::Text("```mermaid\ngraph LR".to_string()))
+            Some(StreamItem::UnclosedDiagram {
+                opening_fence: "```mermaid".to_string(),
+                content: "graph LR".to_string(),
+            })
         );
     }
 
@@ -528,7 +674,152 @@ mod tests {
         let unclosed = machine.finish();
         assert_eq!(
             unclosed,
-            Some(StreamItem::Text(format!("{fence}\ngraph TD")))
+            Some(StreamItem::UnclosedDiagram {
+                opening_fence: fence.to_string(),
+                content: "graph TD".to_string(),
+            })
         );
+    }
+
+    fn collect_segments(input: &[u8], max: usize) -> Vec<(String, bool, bool)> {
+        LossyLines::with_segment_bytes(input, max)
+            .map(|line| line.map(|l| (l.text, l.continues, l.had_invalid_utf8)))
+            .collect::<Result<_, _>>()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_lossy_lines_segments_split_long_line_without_loss() {
+        assert_eq!(
+            collect_segments(b"abcdefghij\nxy\n", 4),
+            vec![
+                ("abcd".to_string(), true, false),
+                ("efgh".to_string(), true, false),
+                ("ij".to_string(), false, false),
+                ("xy".to_string(), false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_lossy_lines_segments_keep_utf8_sequences_intact() {
+        let input = "é".repeat(9) + "\n";
+        let segments = collect_segments(input.as_bytes(), 5);
+        assert!(segments.iter().all(|(_, _, invalid)| !invalid));
+        let rebuilt: String = segments.iter().map(|(text, _, _)| text.as_str()).collect();
+        assert_eq!(rebuilt, "é".repeat(9));
+        assert!(segments.len() > 1);
+    }
+
+    #[test]
+    fn test_lossy_lines_segments_still_report_invalid_utf8() {
+        let segments = collect_segments(b"ab\xffcd\n", 16);
+        assert_eq!(segments, vec![("ab\u{fffd}cd".to_string(), false, true)]);
+    }
+
+    #[test]
+    fn test_lossy_lines_segments_flush_truncated_char_at_eof() {
+        let segments = collect_segments(b"abc\xc3", 3);
+        let rebuilt: String = segments.iter().map(|(text, _, _)| text.as_str()).collect();
+        assert_eq!(rebuilt, "abc\u{fffd}");
+        assert_eq!(
+            segments.last().map(|(_, continues, _)| *continues),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn test_lossy_lines_segments_bound_memory_per_segment() {
+        let input = vec![b'x'; 1_000_000];
+        let longest = LossyLines::with_segment_bytes(input.as_slice(), 1024)
+            .filter_map(Result::ok)
+            .map(|line| line.text.len())
+            .max();
+        assert!(longest.is_some_and(|len| len <= 1024 + 3));
+    }
+
+    #[test]
+    fn test_lossy_lines_segments_tiny_limit_still_progresses() {
+        let segments = collect_segments("é\n".as_bytes(), 0);
+        let rebuilt: String = segments.iter().map(|(text, _, _)| text.as_str()).collect();
+        assert_eq!(rebuilt, "é");
+    }
+
+    fn segment(text: &str, continues: bool) -> LossyLine {
+        LossyLine {
+            text: text.to_string(),
+            had_invalid_utf8: false,
+            continues,
+        }
+    }
+
+    #[test]
+    fn test_machine_relays_long_line_as_fragments_then_text() {
+        let mut machine = StreamStateMachine::new();
+        assert_eq!(
+            machine.process_segment(&segment("aaaa", true)),
+            Some(StreamItem::TextFragment("aaaa".to_string()))
+        );
+        assert_eq!(
+            machine.process_segment(&segment("bb", false)),
+            Some(StreamItem::Text("bb".to_string()))
+        );
+        assert_eq!(machine.finish(), None);
+    }
+
+    #[test]
+    fn test_machine_does_not_open_fence_in_middle_of_long_line() {
+        let mut machine = StreamStateMachine::new();
+        let _ = machine.process_segment(&segment("aaaa", true));
+        assert_eq!(
+            machine.process_segment(&segment("```mermaid", false)),
+            Some(StreamItem::Text("```mermaid".to_string()))
+        );
+        assert_eq!(
+            machine.process_line("graph LR"),
+            Some(StreamItem::Text("graph LR".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_machine_resumes_fence_detection_after_long_line() {
+        let mut machine = StreamStateMachine::new();
+        let _ = machine.process_segment(&segment("aaaa", true));
+        let _ = machine.process_segment(&segment("bb", false));
+        assert_eq!(machine.process_line("```mermaid"), None);
+    }
+
+    #[test]
+    fn test_machine_long_line_inside_diagram_skips_block() {
+        let mut machine = StreamStateMachine::new();
+        assert_eq!(machine.process_line("```mermaid"), None);
+        assert_eq!(machine.process_line("graph LR"), None);
+        assert_eq!(machine.process_segment(&segment("xxxx", true)), None);
+        assert_eq!(machine.process_segment(&segment("```", false)), None);
+        assert_eq!(
+            machine.process_line("```"),
+            Some(StreamItem::OversizedDiagram {
+                skipped_bytes: "graph LR".len() + 1 + "xxxx".len() + "```".len() + 1,
+            })
+        );
+    }
+
+    #[test]
+    fn test_machine_long_line_in_foreign_fence_keeps_fence_open() {
+        let mut machine = StreamStateMachine::new();
+        let _ = machine.process_line("```python");
+        let _ = machine.process_segment(&segment("aaaa", true));
+        let _ = machine.process_segment(&segment("```", false));
+        assert_eq!(
+            machine.process_line("```mermaid"),
+            Some(StreamItem::Text("```mermaid".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_machine_finish_terminates_pending_long_line() {
+        let mut machine = StreamStateMachine::new();
+        let _ = machine.process_segment(&segment("aaaa", true));
+        assert_eq!(machine.finish(), Some(StreamItem::Text(String::new())));
     }
 }

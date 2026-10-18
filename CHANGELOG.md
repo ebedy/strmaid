@@ -6,6 +6,36 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
+## [Non publié]
+
+### Corrections
+
+- Rendu `AsciiBox` : un bloc précédé d'un front matter YAML (`---` … `---`) n'est plus
+  rejeté avec `type de diagramme non supporté en mode texte: ---`. Le front matter est
+  retiré avant l'appel à `mermaid-text`.
+- Rendu `AsciiBox` : la largeur cible est désormais une limite stricte. Un diagramme qui la
+  dépasse après compactage bascule en `GracefulFallback` (`Limite de ressources dépassée: le
+  diagramme dépasse la largeur du terminal (105 > 74 colonnes)`, source restituée) au lieu
+  de déborder du terminal ; en JSON, `kind: "TooWide"`. La largeur cible est celle des
+  graphiques (93 % ou 90 % du terminal) : un rendu qui tiendrait entre cette marge et la
+  largeur réelle est aussi replié.
+- Le langage d'une fence Mermaid est reconnu sans distinction de casse (` ```Mermaid `,
+  ` ```MERMAID `, ` ```MermaidJS `), pour le filtre, le pager, `strmaid run`, `--block-only`
+  et le serveur MCP.
+- Un bloc Mermaid non fermé en fin de flux est restitué précédé d'un avertissement
+  (`Bloc Mermaid non fermé : flux terminé avant la clôture, contenu restitué sans rendu`) ;
+  en JSON/NDJSON, il devient un élément `diagram` avec `valid: false` et
+  `kind: "UnterminatedBlock"` au lieu d'un élément `text`. `strmaid run` n'est pas modifié.
+- Le repli d'un type de diagramme inconnu de `mermaid-svg` indique désormais la piste à suivre :
+  `type de diagramme inconnu: venn-beta (non pris en charge par mermaid-svg ; essayez --engine
+  merman)`, ou `recompilez avec --features merman puis utilisez --engine merman` si le binaire
+  n'embarque pas `merman`. Le `kind` JSON (`UnknownDiagramType`) est inchangé.
+- Mémoire bornée sur une ligne de texte très longue : une ligne sans `\n` n'est plus
+  chargée en entier (16 Mio de ligne : 37 Mio de RSS auparavant, 6 Mio maintenant). Elle est
+  relayée sans perte par segments de `ResourceLimits::max_line_bytes` (1 Mio) en filtre et
+  en pager. Une ligne plus longue que cette limite n'ouvre ni ne ferme plus de bloc
+  Mermaid ; en sortie NDJSON/JSON, elle apparaît en plusieurs éléments `text` consécutifs.
+
 ## [0.5.1] - 2026-10-10
 
 ### Corrections

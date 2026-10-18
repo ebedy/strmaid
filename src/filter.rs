@@ -3,7 +3,9 @@ use crate::domain::{
     ResourceLimits, sanitize_passthrough_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
+use crate::stream::{
+    LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once, unclosed_block_text,
+};
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
@@ -130,10 +132,10 @@ fn drive_stream<R: BufRead>(
 ) -> Result<(), CliError> {
     let mut machine = StreamStateMachine::with_limits(limits);
     let mut utf8_reported = false;
-    for line_result in LossyLines::new(reader) {
+    for line_result in LossyLines::with_segment_bytes(reader, limits.max_line_bytes) {
         let line = line_result?;
         utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
-        if let Some(item) = machine.process_line(&line.text) {
+        if let Some(item) = machine.process_segment(&line) {
             on_item(&item)?;
         }
     }
@@ -164,6 +166,10 @@ fn write_human_item<W: Write>(
             let relayed = passthrough_text(text, options);
             writeln!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
         }
+        StreamItem::TextFragment(text) => {
+            let relayed = passthrough_text(text, options);
+            write!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
+        }
         StreamItem::Diagram(diagram) => {
             let rendered = renderer::render_diagram(diagram, options);
             write_flushed(writer, &rendered)?;
@@ -171,6 +177,15 @@ fn write_human_item<W: Write>(
         StreamItem::OversizedDiagram { skipped_bytes } => {
             let notice = renderer::render_oversized_notice(*skipped_bytes, options);
             write_flushed(writer, &notice)?;
+        }
+        StreamItem::UnclosedDiagram {
+            opening_fence,
+            content,
+        } => {
+            write_flushed(writer, &renderer::render_unclosed_notice())?;
+            let source = unclosed_block_text(opening_fence, content);
+            let relayed = passthrough_text(&source, options);
+            writeln!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
         }
     }
     Ok(())
@@ -246,7 +261,7 @@ fn convert_to_json_item(
     diagram_index: &mut usize,
 ) -> JsonStreamItem {
     match item {
-        StreamItem::Text(text) => JsonStreamItem::Text {
+        StreamItem::Text(text) | StreamItem::TextFragment(text) => JsonStreamItem::Text {
             content: text.clone(),
         },
         StreamItem::Diagram(diagram) => {
@@ -257,6 +272,9 @@ fn convert_to_json_item(
             options,
             next_index(diagram_index),
         ),
+        StreamItem::UnclosedDiagram { content, .. } => {
+            renderer::unclosed_diagram_json_item(content, next_index(diagram_index))
+        }
     }
 }
 
@@ -635,5 +653,139 @@ mod tests {
 
         let doc: Result<JsonDocumentOutput, _> = serde_json::from_slice(&out_json);
         assert!(doc.is_ok());
+    }
+
+    fn run_human(input: &str) -> String {
+        let mut output = Vec::new();
+        assert!(run_filter(Cursor::new(input), &mut output, RenderOptions::default()).is_ok());
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    #[test]
+    fn test_run_filter_warns_on_unclosed_block_and_relays_content() {
+        let output = run_human("avant\n```mermaid\ngraph LR\n  A --> B");
+        assert!(output.starts_with("avant\n"), "{output:?}");
+        assert!(output.contains("Bloc Mermaid non fermé"), "{output:?}");
+        assert!(
+            output.ends_with("```mermaid\ngraph LR\n  A --> B\n"),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_filter_unclosed_block_content_is_sanitized() {
+        let output = run_human("```mermaid\ngraph LR\n\x1b]52;c;ZXZpbA==\x07");
+        assert!(!output.contains("\x1b]"), "{output:?}");
+    }
+
+    #[test]
+    fn test_run_filter_closed_block_has_no_unclosed_warning() {
+        let output = run_human("```mermaid\ngraph LR\n  A --> B\n```\n");
+        assert!(!output.contains("non fermé"), "{output:?}");
+    }
+
+    #[test]
+    fn test_run_filter_json_reports_unclosed_block_as_invalid_diagram() {
+        let mut output = Vec::new();
+        let options = RenderOptions::default().with_format(OutputFormat::Json);
+        assert!(run_filter(Cursor::new("```mermaid\ngraph LR"), &mut output, options).is_ok());
+        let doc: serde_json::Value = serde_json::from_slice(&output).unwrap_or_default();
+        let item = &doc["items"][0];
+        assert_eq!(item["type"], "diagram");
+        assert_eq!(item["valid"], false);
+        assert_eq!(item["error"]["kind"], "UnterminatedBlock");
+        assert_eq!(item["raw_content"], "graph LR");
+        assert_eq!(doc["summary"]["invalid_diagrams"], 1);
+    }
+
+    fn tiny_line_options() -> RenderOptions {
+        RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            ResourceLimits {
+                max_line_bytes: 8,
+                ..ResourceLimits::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_run_filter_relays_long_line_without_loss() {
+        let long_line = "é0123456789".repeat(20);
+        let input = format!("avant\n{long_line}\napres\n");
+        let mut output = Vec::new();
+        assert!(
+            run_filter(
+                Cursor::new(input.as_str()),
+                &mut output,
+                tiny_line_options()
+            )
+            .is_ok()
+        );
+        assert_eq!(String::from_utf8_lossy(&output), input);
+    }
+
+    #[test]
+    fn test_run_filter_long_line_is_not_parsed_as_fence() {
+        let input = "0123456789```mermaid\ngraph LR\n";
+        let mut output = Vec::new();
+        assert!(run_filter(Cursor::new(input), &mut output, tiny_line_options()).is_ok());
+        assert_eq!(String::from_utf8_lossy(&output), input);
+    }
+
+    #[test]
+    fn test_run_filter_long_line_without_final_newline_ends_with_newline() {
+        let mut output = Vec::new();
+        let input = "x".repeat(24);
+        assert!(
+            run_filter(
+                Cursor::new(input.as_str()),
+                &mut output,
+                tiny_line_options()
+            )
+            .is_ok()
+        );
+        assert_eq!(String::from_utf8_lossy(&output), format!("{input}\n"));
+    }
+
+    #[test]
+    fn test_run_filter_long_line_never_reassembles_active_escape() {
+        let payload = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\x1b[1;31mrouge\x1b[0m";
+        for prefix in 0..8 {
+            let input = format!("{}{payload}\n", "p".repeat(prefix));
+            let mut output = Vec::new();
+            assert!(
+                run_filter(
+                    Cursor::new(input.as_str()),
+                    &mut output,
+                    tiny_line_options()
+                )
+                .is_ok()
+            );
+            let text = String::from_utf8_lossy(&output);
+            assert!(
+                !text.contains("\x1b]"),
+                "OSC reconstitué (prefix={prefix}) : {text:?}"
+            );
+            assert!(
+                !text.contains("\x1b[2J"),
+                "CSI actif reconstitué (prefix={prefix}) : {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_filter_ndjson_long_line_is_split_into_text_items() {
+        let input = format!("{}\n", "x".repeat(20));
+        let mut output = Vec::new();
+        let options = tiny_line_options().with_format(OutputFormat::Ndjson);
+        assert!(run_filter(Cursor::new(input.as_str()), &mut output, options).is_ok());
+        let rebuilt: String = String::from_utf8_lossy(&output)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|item| item["content"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(rebuilt, "x".repeat(20));
     }
 }

@@ -2,7 +2,7 @@ use crate::domain::{
     CliError, GraphicsProtocol, ThemeMode, ViewportGeometry, sanitize_terminal_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{LossyLines, StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine, unclosed_block_text};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -141,12 +141,24 @@ impl PagerApp {
 /// thread lecteur pour ne jamais bloquer la boucle d'événements.
 fn render_item_lines(item: StreamItem, options: RenderOptions) -> Vec<String> {
     match item {
-        StreamItem::Text(text) => sanitized_lines(text.split('\n')),
+        StreamItem::Text(text) | StreamItem::TextFragment(text) => {
+            sanitized_lines(text.split('\n'))
+        }
         StreamItem::Diagram(diagram) => sanitized_lines(
             renderer::render_diagram(&diagram, pager_diagram_options(options)).lines(),
         ),
         StreamItem::OversizedDiagram { skipped_bytes } => {
             sanitized_lines(renderer::render_oversized_notice(skipped_bytes, options).lines())
+        }
+        StreamItem::UnclosedDiagram {
+            opening_fence,
+            content,
+        } => {
+            let notice = renderer::render_unclosed_notice();
+            let source = unclosed_block_text(&opening_fence, &content);
+            let mut lines = sanitized_lines(notice.lines());
+            lines.extend(sanitized_lines(source.split('\n')));
+            lines
         }
     }
 }
@@ -205,16 +217,16 @@ fn spawn_reader_thread<R: BufRead + Send + 'static>(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut machine = StreamStateMachine::with_limits(options.limits);
-        for line_result in LossyLines::new(reader) {
+        for line_result in LossyLines::with_segment_bytes(reader, options.limits.max_line_bytes) {
             let line = match line_result {
-                Ok(line) => line.text,
+                Ok(line) => line,
                 Err(err) => {
                     let _ = tx.send(Err(err));
                     return;
                 }
             };
 
-            let Some(item) = machine.process_line(&line) else {
+            let Some(item) = machine.process_segment(&line) else {
                 continue;
             };
             let lines = render_item_lines(item, options);
@@ -892,5 +904,16 @@ mod tests {
             process_terminal_event(&mut app, &focus_lost),
             TerminalEventOutcome::NoEvent
         );
+    }
+
+    #[test]
+    fn test_render_item_lines_unclosed_block_puts_notice_before_source() {
+        let item = StreamItem::UnclosedDiagram {
+            opening_fence: "```mermaid".to_string(),
+            content: "graph LR\n  A --> B".to_string(),
+        };
+        let lines = render_item_lines(item, kitty_options());
+        assert!(lines.first().is_some_and(|line| line.contains("non fermé")));
+        assert_eq!(lines[1..], ["```mermaid", "graph LR", "  A --> B"]);
     }
 }
