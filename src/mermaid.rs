@@ -298,12 +298,14 @@ const fn merman_theme_name(theme: ThemeMode) -> &'static str {
 }
 
 /// Injecte une directive `init` de thème, `merman` n'exposant pas d'option de thème
-/// typée. Placée après un éventuel front matter YAML (qui doit rester en tête) et
-/// avant les directives de l'utilisateur, qui gardent ainsi la priorité.
+/// typée. `htmlLabels` est désactivé : par défaut `merman` écrit ses libellés dans des
+/// `<foreignObject>` HTML que `resvg` ne rend pas, et les nœuds s'affichent vides.
+/// Placée après un éventuel front matter YAML (qui doit rester en tête) et avant les
+/// directives de l'utilisateur, qui gardent ainsi la priorité.
 #[cfg(feature = "merman")]
 fn with_merman_theme(source: &str, theme: ThemeMode) -> String {
     let directive = format!(
-        "%%{{init: {{\"theme\": \"{}\"}}}}%%",
+        "%%{{init: {{\"theme\": \"{}\", \"htmlLabels\": false}}}}%%",
         merman_theme_name(theme)
     );
     let (frontmatter, body) = split_frontmatter(source);
@@ -794,6 +796,33 @@ mod tests {
         let dark = merman_svg(source, ThemeMode::Dark);
         assert!(dark.contains("Titre"), "front matter perdu : {dark}");
         assert_ne!(dark, merman_svg(source, ThemeMode::Light));
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_labels_are_svg_text_for_rasterizer() {
+        let sources = [
+            "flowchart TD\n  A[Start] --> B{Valid?}",
+            "classDiagram\n  class Animal {\n    +name\n  }",
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> Busy",
+            "erDiagram\n  CLIENT ||--o{ ORDER : passe",
+            "requirementDiagram\n  requirement r1 {\n    id: 1\n    text: texte\n    risk: high\n    verifymethod: test\n  }",
+        ];
+        for source in sources {
+            let svg = merman_svg(source, ThemeMode::Dark);
+            assert!(svg.contains("<text"), "aucun <text> pour {source:?}");
+            assert!(
+                !svg.contains("<foreignObject"),
+                "libellés HTML non rendus par resvg pour {source:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "merman")]
+    #[test]
+    fn test_merman_user_init_directive_can_restore_html_labels() {
+        let source = "%%{init: {\"htmlLabels\": true}}%%\nflowchart TD\n  A[Start] --> B[Done]";
+        assert!(merman_svg(source, ThemeMode::Dark).contains("<foreignObject"));
     }
 
     #[cfg(feature = "merman")]

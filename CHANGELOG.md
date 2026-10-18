@@ -6,6 +6,18 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
+## [Non publié]
+
+### Corrections
+
+- Moteur `merman` : les libellés des nœuds s'affichent désormais pour `flowchart`,
+  `requirementDiagram`, `usecase`, `agentflow` et la plupart des nœuds de `swimlane-beta`.
+  `merman` écrivait ces libellés dans des `<foreignObject>` HTML que `resvg` ne dessine pas,
+  et les nœuds restaient vides. La directive `init` injectée porte `"htmlLabels": false` ;
+  une directive `init` de l'utilisateur garde la priorité. `mindmap`, `kanban`, `block-beta`
+  et une partie de `eventmodeling` et `userJourney` écrivent toujours des `<foreignObject>` :
+  leurs libellés restent absents de l'image avec `--engine merman`.
+
 ## [0.6.0] - 2026-10-18
 
 ### Corrections
