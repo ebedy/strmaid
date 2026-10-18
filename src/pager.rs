@@ -2,7 +2,7 @@ use crate::domain::{
     CliError, GraphicsProtocol, ThemeMode, ViewportGeometry, sanitize_terminal_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{LossyLines, StreamItem, StreamStateMachine};
+use crate::stream::{LossyLines, StreamItem, StreamStateMachine, unclosed_block_text};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -149,6 +149,16 @@ fn render_item_lines(item: StreamItem, options: RenderOptions) -> Vec<String> {
         ),
         StreamItem::OversizedDiagram { skipped_bytes } => {
             sanitized_lines(renderer::render_oversized_notice(skipped_bytes, options).lines())
+        }
+        StreamItem::UnclosedDiagram {
+            opening_fence,
+            content,
+        } => {
+            let notice = renderer::render_unclosed_notice();
+            let source = unclosed_block_text(&opening_fence, &content);
+            let mut lines = sanitized_lines(notice.lines());
+            lines.extend(sanitized_lines(source.split('\n')));
+            lines
         }
     }
 }
@@ -894,5 +904,16 @@ mod tests {
             process_terminal_event(&mut app, &focus_lost),
             TerminalEventOutcome::NoEvent
         );
+    }
+
+    #[test]
+    fn test_render_item_lines_unclosed_block_puts_notice_before_source() {
+        let item = StreamItem::UnclosedDiagram {
+            opening_fence: "```mermaid".to_string(),
+            content: "graph LR\n  A --> B".to_string(),
+        };
+        let lines = render_item_lines(item, kitty_options());
+        assert!(lines.first().is_some_and(|line| line.contains("non fermé")));
+        assert_eq!(lines[1..], ["```mermaid", "graph LR", "  A --> B"]);
     }
 }

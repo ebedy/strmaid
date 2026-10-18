@@ -175,6 +175,34 @@ pub fn render_oversized_notice(skipped_bytes: usize, options: RenderOptions) -> 
     )
 }
 
+const UNCLOSED_MESSAGE: &str =
+    "Bloc Mermaid non fermé : flux terminé avant la clôture, contenu restitué sans rendu";
+
+/// Avertissement `GracefulFallback` d'un bloc dont la clôture n'est jamais arrivée.
+#[must_use]
+pub fn render_unclosed_notice() -> String {
+    format!("\x1b[33m⚠️  [{UNCLOSED_MESSAGE}]\x1b[0m\n")
+}
+
+/// Élément structuré d'un bloc non fermé (`valid: false`, `kind: UnterminatedBlock`).
+#[must_use]
+pub fn unclosed_diagram_json_item(content: &str, index: usize) -> JsonStreamItem {
+    JsonStreamItem::Diagram {
+        index,
+        valid: false,
+        title: None,
+        dimensions: None,
+        protocol: None,
+        payload: None,
+        error: Some(DiagramErrorDetail::new(
+            UNCLOSED_MESSAGE.to_string(),
+            None,
+            Some("UnterminatedBlock".to_string()),
+        )),
+        raw_content: content.to_string(),
+    }
+}
+
 /// Élément structuré d'un diagramme hors quota (`valid: false`, `kind: ResourceLimit`).
 #[must_use]
 pub fn oversized_diagram_json_item(

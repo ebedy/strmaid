@@ -90,7 +90,8 @@ fn stream_diagrams(input: &str) -> Vec<DiagramBlock> {
             StreamItem::Diagram(block) => Some(block),
             StreamItem::Text(_)
             | StreamItem::TextFragment(_)
-            | StreamItem::OversizedDiagram { .. } => None,
+            | StreamItem::OversizedDiagram { .. }
+            | StreamItem::UnclosedDiagram { .. } => None,
         })
         .collect()
 }

@@ -3,7 +3,9 @@ use crate::domain::{
     ResourceLimits, sanitize_passthrough_text,
 };
 use crate::renderer::{self, RenderOptions};
-use crate::stream::{LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once};
+use crate::stream::{
+    LossyLines, StreamItem, StreamStateMachine, report_invalid_utf8_once, unclosed_block_text,
+};
 use std::borrow::Cow;
 use std::io::{BufRead, Write};
 
@@ -176,6 +178,15 @@ fn write_human_item<W: Write>(
             let notice = renderer::render_oversized_notice(*skipped_bytes, options);
             write_flushed(writer, &notice)?;
         }
+        StreamItem::UnclosedDiagram {
+            opening_fence,
+            content,
+        } => {
+            write_flushed(writer, &renderer::render_unclosed_notice())?;
+            let source = unclosed_block_text(opening_fence, content);
+            let relayed = passthrough_text(&source, options);
+            writeln!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
+        }
     }
     Ok(())
 }
@@ -261,6 +272,9 @@ fn convert_to_json_item(
             options,
             next_index(diagram_index),
         ),
+        StreamItem::UnclosedDiagram { content, .. } => {
+            renderer::unclosed_diagram_json_item(content, next_index(diagram_index))
+        }
     }
 }
 
@@ -639,6 +653,49 @@ mod tests {
 
         let doc: Result<JsonDocumentOutput, _> = serde_json::from_slice(&out_json);
         assert!(doc.is_ok());
+    }
+
+    fn run_human(input: &str) -> String {
+        let mut output = Vec::new();
+        assert!(run_filter(Cursor::new(input), &mut output, RenderOptions::default()).is_ok());
+        String::from_utf8_lossy(&output).into_owned()
+    }
+
+    #[test]
+    fn test_run_filter_warns_on_unclosed_block_and_relays_content() {
+        let output = run_human("avant\n```mermaid\ngraph LR\n  A --> B");
+        assert!(output.starts_with("avant\n"), "{output:?}");
+        assert!(output.contains("Bloc Mermaid non fermé"), "{output:?}");
+        assert!(
+            output.ends_with("```mermaid\ngraph LR\n  A --> B\n"),
+            "{output:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_filter_unclosed_block_content_is_sanitized() {
+        let output = run_human("```mermaid\ngraph LR\n\x1b]52;c;ZXZpbA==\x07");
+        assert!(!output.contains("\x1b]"), "{output:?}");
+    }
+
+    #[test]
+    fn test_run_filter_closed_block_has_no_unclosed_warning() {
+        let output = run_human("```mermaid\ngraph LR\n  A --> B\n```\n");
+        assert!(!output.contains("non fermé"), "{output:?}");
+    }
+
+    #[test]
+    fn test_run_filter_json_reports_unclosed_block_as_invalid_diagram() {
+        let mut output = Vec::new();
+        let options = RenderOptions::default().with_format(OutputFormat::Json);
+        assert!(run_filter(Cursor::new("```mermaid\ngraph LR"), &mut output, options).is_ok());
+        let doc: serde_json::Value = serde_json::from_slice(&output).unwrap_or_default();
+        let item = &doc["items"][0];
+        assert_eq!(item["type"], "diagram");
+        assert_eq!(item["valid"], false);
+        assert_eq!(item["error"]["kind"], "UnterminatedBlock");
+        assert_eq!(item["raw_content"], "graph LR");
+        assert_eq!(doc["summary"]["invalid_diagrams"], 1);
     }
 
     fn tiny_line_options() -> RenderOptions {

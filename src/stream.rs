@@ -215,6 +215,21 @@ pub enum StreamItem {
     OversizedDiagram {
         skipped_bytes: usize,
     },
+    /// Bloc Mermaid dont la clôture n'est jamais arrivée : le flux s'est terminé en cours de
+    /// capture. Le contenu est conservé pour être restitué avec un avertissement.
+    UnclosedDiagram {
+        opening_fence: String,
+        content: String,
+    },
+}
+
+/// Texte d'un bloc non fermé tel que reçu : balise d'ouverture puis contenu.
+#[must_use]
+pub fn unclosed_block_text(opening_fence: &str, content: &str) -> String {
+    if content.is_empty() {
+        return opening_fence.to_string();
+    }
+    format!("{opening_fence}\n{content}")
 }
 
 /// Bloc Mermaid en cours d'accumulation.
@@ -231,8 +246,11 @@ impl DiagramCapture {
         DiagramBlock::with_metadata(self.buffer.join("\n"), self.fence.metadata())
     }
 
-    fn into_unclosed_text(self) -> String {
-        format!("{}\n{}", self.opening_fence, self.buffer.join("\n"))
+    fn into_unclosed_item(self) -> StreamItem {
+        StreamItem::UnclosedDiagram {
+            opening_fence: self.opening_fence,
+            content: self.buffer.join("\n"),
+        }
     }
 }
 
@@ -421,9 +439,7 @@ impl StreamStateMachine {
             State::Passthrough | State::InForeignFence(_) => {
                 unterminated_long_line.then(|| StreamItem::Text(String::new()))
             }
-            State::CapturingDiagram(capture) => {
-                Some(StreamItem::Text(capture.into_unclosed_text()))
-            }
+            State::CapturingDiagram(capture) => Some(capture.into_unclosed_item()),
             State::SkippingOversizedDiagram(skip) => Some(StreamItem::OversizedDiagram {
                 skipped_bytes: skip.skipped_bytes,
             }),
@@ -478,7 +494,10 @@ mod tests {
         let eof = machine.finish();
         assert_eq!(
             eof,
-            Some(StreamItem::Text("```mermaid\ngraph LR".to_string()))
+            Some(StreamItem::UnclosedDiagram {
+                opening_fence: "```mermaid".to_string(),
+                content: "graph LR".to_string(),
+            })
         );
     }
 
@@ -655,7 +674,10 @@ mod tests {
         let unclosed = machine.finish();
         assert_eq!(
             unclosed,
-            Some(StreamItem::Text(format!("{fence}\ngraph TD")))
+            Some(StreamItem::UnclosedDiagram {
+                opening_fence: fence.to_string(),
+                content: "graph TD".to_string(),
+            })
         );
     }
 

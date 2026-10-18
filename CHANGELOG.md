@@ -22,6 +22,10 @@ rupture de compatibilité incrémente la version mineure.
 - Le langage d'une fence Mermaid est reconnu sans distinction de casse (` ```Mermaid `,
   ` ```MERMAID `, ` ```MermaidJS `), pour le filtre, le pager, `strmaid run`, `--block-only`
   et le serveur MCP.
+- Un bloc Mermaid non fermé en fin de flux est restitué précédé d'un avertissement
+  (`Bloc Mermaid non fermé : flux terminé avant la clôture, contenu restitué sans rendu`) ;
+  en JSON/NDJSON, il devient un élément `diagram` avec `valid: false` et
+  `kind: "UnterminatedBlock"` au lieu d'un élément `text`. `strmaid run` n'est pas modifié.
 - Mémoire bornée sur une ligne de texte très longue : une ligne sans `\n` n'est plus
   chargée en entier (16 Mio de ligne : 37 Mio de RSS auparavant, 6 Mio maintenant). Elle est
   relayée sans perte par segments de `ResourceLimits::max_line_bytes` (1 Mio) en filtre et
