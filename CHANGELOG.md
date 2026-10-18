@@ -6,6 +6,14 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
+## [Non publié]
+
+### Corrections
+
+- Rendu `AsciiBox` : un bloc précédé d'un front matter YAML (`---` … `---`) n'est plus
+  rejeté avec `type de diagramme non supporté en mode texte: ---`. Le front matter est
+  retiré avant l'appel à `mermaid-text`.
+
 ## [0.5.1] - 2026-10-10
 
 ### Corrections

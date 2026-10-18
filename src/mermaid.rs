@@ -303,8 +303,7 @@ fn with_merman_theme(source: &str, theme: ThemeMode) -> String {
 }
 
 /// Sépare un front matter YAML de tête (`---` … `---`) du reste de la source.
-#[cfg(feature = "merman")]
-fn split_frontmatter(source: &str) -> (&str, &str) {
+pub(crate) fn split_frontmatter(source: &str) -> (&str, &str) {
     let Some(after_opening) = source.strip_prefix("---\n") else {
         return ("", source);
     };

@@ -1,4 +1,5 @@
 use crate::domain::DiagramErrorDetail;
+use crate::mermaid::split_frontmatter;
 use mermaid_text::{
     Error as MermaidTextError, RenderOptions as MtRenderOptions, render_with_options,
 };
@@ -42,7 +43,8 @@ pub fn render_asciibox(
         ..MtRenderOptions::default()
     };
 
-    render_with_options(&adapt_for_mermaid_text(source), &opts).map_err(map_mermaid_text_error)
+    let (_frontmatter, body) = split_frontmatter(source);
+    render_with_options(&adapt_for_mermaid_text(body), &opts).map_err(map_mermaid_text_error)
 }
 
 /// Compense deux écarts de `mermaid-text` 0.57 avec Mermaid sur les flowcharts : les
@@ -199,6 +201,31 @@ mod tests {
         assert!(rendered.contains("Build"));
         assert!(rendered.contains("Deploy"));
         assert!(rendered.chars().any(|c| c == '┌' || c == '│' || c == '└'));
+    }
+
+    #[test]
+    fn test_render_asciibox_ignores_leading_frontmatter() {
+        let opts = AsciiBoxOptions::new(80, false);
+        let source = "---\ntitle: Demo\n---\nflowchart TD\n    A[Start] --> B[End]";
+        let rendered = render_asciibox(source, opts).unwrap_or_default();
+        assert!(rendered.contains("Start"), "rendu absent : {rendered:?}");
+        assert!(rendered.contains("End"));
+    }
+
+    #[test]
+    fn test_render_asciibox_frontmatter_matches_plain_rendering() {
+        let opts = AsciiBoxOptions::new(80, false);
+        let body = "sequenceDiagram\n    Alice->>Bob: Hello";
+        let with_frontmatter = render_asciibox(&format!("---\ntitle: Demo\n---\n{body}"), opts);
+        assert_eq!(with_frontmatter, render_asciibox(body, opts));
+        assert!(with_frontmatter.is_ok());
+    }
+
+    #[test]
+    fn test_render_asciibox_unclosed_frontmatter_is_not_stripped() {
+        let opts = AsciiBoxOptions::new(80, false);
+        let result = render_asciibox("---\ntitle: Demo\nflowchart TD\n    A --> B", opts);
+        assert!(result.is_err());
     }
 
     #[test]
