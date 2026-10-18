@@ -6,7 +6,7 @@ Le format suit [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/) et le pr
 respecte le [versionnage sémantique](https://semver.org/lang/fr/). Avant la 1.0.0, une
 rupture de compatibilité incrémente la version mineure.
 
-## [Non publié]
+## [0.6.1] - 2026-10-18
 
 ### Corrections
 
@@ -17,6 +17,15 @@ rupture de compatibilité incrémente la version mineure.
   une directive `init` de l'utilisateur garde la priorité. `mindmap`, `kanban`, `block-beta`
   et une partie de `eventmodeling` et `userJourney` écrivent toujours des `<foreignObject>` :
   leurs libellés restent absents de l'image avec `--engine merman`.
+
+### Dépendances
+
+- `portable-pty` 0.9 (était 0.8) : `serial`, abandonné depuis 2017 (RUSTSEC-2017-0008), est
+  remplacé par `serial2` ; six crates disparaissent du `Cargo.lock`. Pour une commande
+  introuvable, `strmaid run` affiche désormais le message plus long de `portable-pty`, qui
+  énumère les entrées de `$PATH`.
+- `Cargo.lock` : 60 paquets mis à jour, dont `merman` 0.8.0 (était 0.8.0-alpha.7). `Cargo.toml`
+  est inchangé pour `merman`.
 
 ## [0.6.0] - 2026-10-18
 
@@ -129,6 +138,7 @@ rupture de compatibilité incrémente la version mineure.
   limité aux secrets.
 - Preuves de charge `#[ignore]` (`cargo test --release --test stress -- --ignored`).
 
+[0.6.1]: https://github.com/ebedy/strmaid/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ebedy/strmaid/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/ebedy/strmaid/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ebedy/strmaid/compare/v0.4.0...v0.5.0
