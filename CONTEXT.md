@@ -41,7 +41,7 @@ Les choix d'architecture historiques du projet répondent à des contraintes str
 - **Alternatives rejetées :**
   - *Runtime V8 embarqué (`deno_core` + `mermaid.min.js`)* : Rejeté pour temps de démarrage prohibitif (1,5 à 3 s vs 2 à 6 ms en Rust natif) et binaire lourd (> 50 Mo).
   - *Headless Chromium (`mermaid-cli`)* : Rejeté pour surconsommation mémoire et inadaptation totale au streaming Unix temps réel.
-- **Conséquences :** Binaire statique autonome sans dépendance C++/JavaScript/Node.js, latence de compilation sub-10ms. Repli gracieux en bloc de code brut pour les syntaxes non prises en charge.
+- **Conséquences :** Binaire statique autonome sans dépendance C++/JavaScript/Node.js, latence de compilation sub-10ms. Repli gracieux en bloc de code brut pour les syntaxes non prises en charge. Dix types récents (`agentflow-beta`, `cynefin-beta`, `eventmodeling`, `ishikawa-beta`, `railroad-ebnf-beta`, `swimlane-beta`, `treeView-beta`, `usecase-beta`, `venn-beta`, `wardley-beta`) relèvent de ce repli ; l'avertissement renvoie vers `--engine merman`. Rendre `merman` moteur par défaut a été écarté : binaire de 42 Mo contre 11 Mo, compilation 3,2 fois plus longue, dépendance en version alpha dans le build par défaut, pour un gain de couverture sur des types encore en bêta.
 
 ### 2. Protocoles Graphiques Terminal & Hiérarchie de Repli Dégradé
 - **Choix :** Kitty Graphics Protocol comme canal principal haute fidélité, repli automatique sur demi-blocs Unicode (`▀`, `▄`) ANSI TrueColor 24-bit, et repli ultime textuel `AsciiBox` pour environnements dégradés.

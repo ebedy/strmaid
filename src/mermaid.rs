@@ -113,6 +113,14 @@ fn create_mono_theme() -> Theme {
     }
 }
 
+/// Piste donnée quand `mermaid-svg` ne connaît pas le type de diagramme : `merman` en couvre
+/// davantage, mais n'est présent que si le binaire est compilé avec la feature du même nom.
+#[cfg(feature = "merman")]
+const ALTERNATIVE_ENGINE_HINT: &str =
+    "non pris en charge par mermaid-svg ; essayez --engine merman";
+#[cfg(not(feature = "merman"))]
+const ALTERNATIVE_ENGINE_HINT: &str = "non pris en charge par mermaid-svg ; recompilez avec --features merman puis utilisez --engine merman";
+
 /// Extrait les informations d'erreur détaillées (message, ligne, catégorie).
 #[must_use]
 pub fn extract_error_detail(err: &mermaid_svg::RenderError) -> DiagramErrorDetail {
@@ -124,7 +132,7 @@ pub fn extract_error_detail(err: &mermaid_svg::RenderError) -> DiagramErrorDetai
                 line,
             } => DiagramErrorDetail::new(message.clone(), Some(*line), Some(format!("{kind:?}"))),
             mermaid_svg::ParseError::UnknownDiagramType(diag_type) => DiagramErrorDetail::new(
-                format!("type de diagramme inconnu: {diag_type}"),
+                format!("type de diagramme inconnu: {diag_type} ({ALTERNATIVE_ENGINE_HINT})"),
                 Some(1),
                 Some("UnknownDiagramType".to_string()),
             ),
@@ -617,6 +625,43 @@ mod tests {
         let block = DiagramBlock::new("invalid diagram syntax $$$$".to_string());
         let svg = render_to_svg(&block, ThemeMode::Dark);
         assert!(svg.is_err());
+    }
+
+    fn unknown_type_error(source: &str) -> DiagramErrorDetail {
+        let block = DiagramBlock::new(source.to_string());
+        render_to_svg_detailed(&block, ThemeMode::Dark)
+            .err()
+            .unwrap_or_else(|| DiagramErrorDetail::new(String::new(), None, None))
+    }
+
+    #[test]
+    fn test_unknown_diagram_type_suggests_merman_engine() {
+        let detail = unknown_type_error("venn-beta\n  set A\n  set B");
+        assert_eq!(detail.kind.as_deref(), Some("UnknownDiagramType"));
+        assert_eq!(detail.line, Some(1));
+        assert!(detail.message.contains("venn-beta"), "{}", detail.message);
+        assert!(
+            detail.message.contains("--engine merman"),
+            "{}",
+            detail.message
+        );
+    }
+
+    #[test]
+    fn test_unknown_diagram_type_hint_matches_compiled_features() {
+        let detail = unknown_type_error("wardley-beta\n  title X");
+        assert_eq!(
+            detail.message.contains("--features merman"),
+            !cfg!(feature = "merman"),
+            "{}",
+            detail.message
+        );
+    }
+
+    #[test]
+    fn test_syntax_error_does_not_suggest_another_engine() {
+        let detail = unknown_type_error("graph TD\n  invalid syntax line 2 $$$");
+        assert!(!detail.message.contains("--engine"), "{}", detail.message);
     }
 
     #[test]
