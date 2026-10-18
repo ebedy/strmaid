@@ -13,6 +13,12 @@ rupture de compatibilité incrémente la version mineure.
 - Rendu `AsciiBox` : un bloc précédé d'un front matter YAML (`---` … `---`) n'est plus
   rejeté avec `type de diagramme non supporté en mode texte: ---`. Le front matter est
   retiré avant l'appel à `mermaid-text`.
+- Rendu `AsciiBox` : la largeur cible est désormais une limite stricte. Un diagramme qui la
+  dépasse après compactage bascule en `GracefulFallback` (`Limite de ressources dépassée: le
+  diagramme dépasse la largeur du terminal (105 > 74 colonnes)`, source restituée) au lieu
+  de déborder du terminal ; en JSON, `kind: "TooWide"`. La largeur cible est celle des
+  graphiques (93 % ou 90 % du terminal) : un rendu qui tiendrait entre cette marge et la
+  largeur réelle est aussi replié.
 - Mémoire bornée sur une ligne de texte très longue : une ligne sans `\n` n'est plus
   chargée en entier (16 Mio de ligne : 37 Mio de RSS auparavant, 6 Mio maintenant). Elle est
   relayée sans perte par segments de `ResourceLimits::max_line_bytes` (1 Mio) en filtre et

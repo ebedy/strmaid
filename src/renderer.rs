@@ -598,9 +598,17 @@ fn render_asciibox_to_terminal(
             (format!("{title_prefix}{text}"), true, Some(text))
         }
         Err(err_detail) => {
-            let cli_err = CliError::MermaidSyntax(err_detail.message);
+            let cli_err = asciibox_error_to_cli(err_detail);
             (format_fallback(diagram, &cli_err), false, None)
         }
+    }
+}
+
+/// Une largeur dépassée est une limite de rendu, pas une erreur de syntaxe.
+fn asciibox_error_to_cli(detail: DiagramErrorDetail) -> CliError {
+    match detail.kind.as_deref() {
+        Some("TooWide") => CliError::ResourceLimit(detail.message),
+        _ => CliError::MermaidSyntax(detail.message),
     }
 }
 
@@ -750,6 +758,25 @@ mod tests {
         assert!(output.contains('A'));
         assert!(output.contains('B'));
         assert!(output.chars().any(|c| c == '┌' || c == '│' || c == '└'));
+    }
+
+    #[test]
+    fn test_render_diagram_asciibox_too_wide_falls_back_to_source() {
+        let source = "sequenceDiagram\n  participant Développeur\n  participant Agent\n  participant Outil\n  Développeur->>Agent: Prompt avec demande de schéma\n  Agent->>Outil: Flux Markdown";
+        let block = DiagramBlock::new(source.to_string());
+        let options = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::AsciiBox,
+            ViewportGeometry::new(20, 24),
+        );
+        let output = render_diagram(&block, options);
+        assert!(output.contains("Rendu Mermaid indisponible"), "{output}");
+        assert!(
+            output.contains("dépasse la largeur du terminal"),
+            "{output}"
+        );
+        assert!(!output.contains("syntaxe"), "{output}");
+        assert!(output.contains(source), "{output}");
     }
 
     #[test]
