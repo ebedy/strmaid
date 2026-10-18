@@ -14,7 +14,7 @@ struct Fixture {
     single_block: bool,
 }
 
-const FIXTURES: [Fixture; 9] = [
+const FIXTURES: [Fixture; 10] = [
     Fixture {
         name: "backticks avec titre",
         input: "```mermaid title=\"T\"\ngraph TD\n  A --> B\n```\n",
@@ -62,6 +62,12 @@ const FIXTURES: [Fixture; 9] = [
         input: "```mermaid-x\ngraph TD\n```\n",
         expected: None,
         single_block: false,
+    },
+    Fixture {
+        name: "langage en majuscules",
+        input: "```Mermaid\ngraph TD\n  A --> B\n```\n",
+        expected: Some(("graph TD\n  A --> B", None)),
+        single_block: true,
     },
     Fixture {
         name: "bloc rust",

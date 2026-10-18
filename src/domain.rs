@@ -354,10 +354,13 @@ impl CodeFence {
         trimmed.len() >= self.length && trimmed.chars().all(|ch| ch == marker)
     }
 
-    /// Bloc dont le langage désigne un diagramme Mermaid (`mermaid` ou `mermaidjs`).
+    /// Bloc dont le langage désigne un diagramme Mermaid (`mermaid` ou `mermaidjs`, sans
+    /// distinction de casse).
     #[must_use]
     pub fn is_mermaid(&self) -> bool {
-        matches!(self.language.as_str(), "mermaid" | "mermaidjs")
+        ["mermaid", "mermaidjs"]
+            .iter()
+            .any(|name| self.language.eq_ignore_ascii_case(name))
     }
 
     /// Métadonnées `title`, `theme` et `width` déclarées après le langage.
@@ -926,6 +929,18 @@ mod tests {
         assert!(opening("````mermaid").is_some_and(|f| f.is_mermaid()));
         assert!(opening("```mermaidjs").is_some_and(|f| f.is_mermaid()));
         assert!(opening("     ```mermaid").is_some_and(|f| f.is_mermaid()));
+    }
+
+    #[test]
+    fn test_code_fence_language_is_case_insensitive() {
+        for info in ["Mermaid", "MERMAID", "MermaidJS", "mErMaId title=\"T\""] {
+            let line = format!("```{info}");
+            assert!(
+                opening(&line).is_some_and(|f| f.is_mermaid()),
+                "{info} devrait être reconnu"
+            );
+        }
+        assert!(opening("```Mermaid-x").is_some_and(|f| !f.is_mermaid()));
     }
 
     #[test]
