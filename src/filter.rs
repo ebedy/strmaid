@@ -130,10 +130,10 @@ fn drive_stream<R: BufRead>(
 ) -> Result<(), CliError> {
     let mut machine = StreamStateMachine::with_limits(limits);
     let mut utf8_reported = false;
-    for line_result in LossyLines::new(reader) {
+    for line_result in LossyLines::with_segment_bytes(reader, limits.max_line_bytes) {
         let line = line_result?;
         utf8_reported = report_invalid_utf8_once(&line, utf8_reported);
-        if let Some(item) = machine.process_line(&line.text) {
+        if let Some(item) = machine.process_segment(&line) {
             on_item(&item)?;
         }
     }
@@ -163,6 +163,10 @@ fn write_human_item<W: Write>(
         StreamItem::Text(text) => {
             let relayed = passthrough_text(text, options);
             writeln!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
+        }
+        StreamItem::TextFragment(text) => {
+            let relayed = passthrough_text(text, options);
+            write!(writer, "{relayed}").map_err(|err| CliError::Io(err.to_string()))?;
         }
         StreamItem::Diagram(diagram) => {
             let rendered = renderer::render_diagram(diagram, options);
@@ -246,7 +250,7 @@ fn convert_to_json_item(
     diagram_index: &mut usize,
 ) -> JsonStreamItem {
     match item {
-        StreamItem::Text(text) => JsonStreamItem::Text {
+        StreamItem::Text(text) | StreamItem::TextFragment(text) => JsonStreamItem::Text {
             content: text.clone(),
         },
         StreamItem::Diagram(diagram) => {
@@ -635,5 +639,96 @@ mod tests {
 
         let doc: Result<JsonDocumentOutput, _> = serde_json::from_slice(&out_json);
         assert!(doc.is_ok());
+    }
+
+    fn tiny_line_options() -> RenderOptions {
+        RenderOptions::with_limits(
+            ThemeMode::Dark,
+            GraphicsProtocol::HalfBlocks,
+            ViewportGeometry::new(80, 24),
+            ResourceLimits {
+                max_line_bytes: 8,
+                ..ResourceLimits::default()
+            },
+        )
+    }
+
+    #[test]
+    fn test_run_filter_relays_long_line_without_loss() {
+        let long_line = "é0123456789".repeat(20);
+        let input = format!("avant\n{long_line}\napres\n");
+        let mut output = Vec::new();
+        assert!(
+            run_filter(
+                Cursor::new(input.as_str()),
+                &mut output,
+                tiny_line_options()
+            )
+            .is_ok()
+        );
+        assert_eq!(String::from_utf8_lossy(&output), input);
+    }
+
+    #[test]
+    fn test_run_filter_long_line_is_not_parsed_as_fence() {
+        let input = "0123456789```mermaid\ngraph LR\n";
+        let mut output = Vec::new();
+        assert!(run_filter(Cursor::new(input), &mut output, tiny_line_options()).is_ok());
+        assert_eq!(String::from_utf8_lossy(&output), input);
+    }
+
+    #[test]
+    fn test_run_filter_long_line_without_final_newline_ends_with_newline() {
+        let mut output = Vec::new();
+        let input = "x".repeat(24);
+        assert!(
+            run_filter(
+                Cursor::new(input.as_str()),
+                &mut output,
+                tiny_line_options()
+            )
+            .is_ok()
+        );
+        assert_eq!(String::from_utf8_lossy(&output), format!("{input}\n"));
+    }
+
+    #[test]
+    fn test_run_filter_long_line_never_reassembles_active_escape() {
+        let payload = "a\x1b]52;c;ZXZpbA==\x07b\x1b[2Jc\x1b[1;31mrouge\x1b[0m";
+        for prefix in 0..8 {
+            let input = format!("{}{payload}\n", "p".repeat(prefix));
+            let mut output = Vec::new();
+            assert!(
+                run_filter(
+                    Cursor::new(input.as_str()),
+                    &mut output,
+                    tiny_line_options()
+                )
+                .is_ok()
+            );
+            let text = String::from_utf8_lossy(&output);
+            assert!(
+                !text.contains("\x1b]"),
+                "OSC reconstitué (prefix={prefix}) : {text:?}"
+            );
+            assert!(
+                !text.contains("\x1b[2J"),
+                "CSI actif reconstitué (prefix={prefix}) : {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_filter_ndjson_long_line_is_split_into_text_items() {
+        let input = format!("{}\n", "x".repeat(20));
+        let mut output = Vec::new();
+        let options = tiny_line_options().with_format(OutputFormat::Ndjson);
+        assert!(run_filter(Cursor::new(input.as_str()), &mut output, options).is_ok());
+        let rebuilt: String = String::from_utf8_lossy(&output)
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|item| item["content"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(rebuilt, "x".repeat(20));
     }
 }

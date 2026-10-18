@@ -209,6 +209,9 @@ pub enum ExecutionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceLimits {
     pub max_diagram_bytes: usize,
+    /// Taille maximale en octets d'un segment de ligne lu en mémoire ; une ligne plus
+    /// longue est relayée par segments successifs et ne peut pas appartenir à un diagramme.
+    pub max_line_bytes: usize,
     pub max_raster_pixels: u32,
     pub max_pager_lines: usize,
     pub max_cached_diagrams: usize,
@@ -225,6 +228,7 @@ impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_diagram_bytes: 1_048_576,
+            max_line_bytes: 1_048_576,
             max_raster_pixels: 8_000_000,
             max_pager_lines: 20_000,
             max_cached_diagrams: 32,

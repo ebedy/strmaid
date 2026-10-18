@@ -82,7 +82,9 @@ fn stream_diagrams(input: &str) -> Vec<DiagramBlock> {
         .into_iter()
         .filter_map(|item| match item {
             StreamItem::Diagram(block) => Some(block),
-            StreamItem::Text(_) | StreamItem::OversizedDiagram { .. } => None,
+            StreamItem::Text(_)
+            | StreamItem::TextFragment(_)
+            | StreamItem::OversizedDiagram { .. } => None,
         })
         .collect()
 }

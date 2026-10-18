@@ -13,6 +13,11 @@ rupture de compatibilité incrémente la version mineure.
 - Rendu `AsciiBox` : un bloc précédé d'un front matter YAML (`---` … `---`) n'est plus
   rejeté avec `type de diagramme non supporté en mode texte: ---`. Le front matter est
   retiré avant l'appel à `mermaid-text`.
+- Mémoire bornée sur une ligne de texte très longue : une ligne sans `\n` n'est plus
+  chargée en entier (16 Mio de ligne : 37 Mio de RSS auparavant, 6 Mio maintenant). Elle est
+  relayée sans perte par segments de `ResourceLimits::max_line_bytes` (1 Mio) en filtre et
+  en pager. Une ligne plus longue que cette limite n'ouvre ni ne ferme plus de bloc
+  Mermaid ; en sortie NDJSON/JSON, elle apparaît en plusieurs éléments `text` consécutifs.
 
 ## [0.5.1] - 2026-10-10
 

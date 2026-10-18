@@ -141,7 +141,9 @@ impl PagerApp {
 /// thread lecteur pour ne jamais bloquer la boucle d'événements.
 fn render_item_lines(item: StreamItem, options: RenderOptions) -> Vec<String> {
     match item {
-        StreamItem::Text(text) => sanitized_lines(text.split('\n')),
+        StreamItem::Text(text) | StreamItem::TextFragment(text) => {
+            sanitized_lines(text.split('\n'))
+        }
         StreamItem::Diagram(diagram) => sanitized_lines(
             renderer::render_diagram(&diagram, pager_diagram_options(options)).lines(),
         ),
@@ -205,16 +207,16 @@ fn spawn_reader_thread<R: BufRead + Send + 'static>(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let mut machine = StreamStateMachine::with_limits(options.limits);
-        for line_result in LossyLines::new(reader) {
+        for line_result in LossyLines::with_segment_bytes(reader, options.limits.max_line_bytes) {
             let line = match line_result {
-                Ok(line) => line.text,
+                Ok(line) => line,
                 Err(err) => {
                     let _ = tx.send(Err(err));
                     return;
                 }
             };
 
-            let Some(item) = machine.process_line(&line) else {
+            let Some(item) = machine.process_segment(&line) else {
                 continue;
             };
             let lines = render_item_lines(item, options);
