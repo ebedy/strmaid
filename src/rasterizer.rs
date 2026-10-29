@@ -69,33 +69,46 @@ fn parse_svg_tree(svg_data: &str, fonts: &Arc<Database>) -> Result<Tree, CliErro
     Tree::from_str(svg_data, &options).map_err(|err| CliError::SvgParsing(format!("{err:?}")))
 }
 
+/// Côté (en pixels) retenu lorsque la taille d'origine du SVG est dégénérée.
+const FALLBACK_SIDE_PX: u32 = 100;
+
 /// Calcule les dimensions cibles en conservant le ratio d'aspect.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
 fn compute_scaled_dimensions(
     orig_w: f32,
     orig_h: f32,
     target_width_px: u32,
 ) -> (u32, u32, Transform) {
     if orig_w <= 0.0 || orig_h <= 0.0 {
-        return (100, 100, Transform::default());
+        return (FALLBACK_SIDE_PX, FALLBACK_SIDE_PX, Transform::default());
     }
 
-    let target_w_f32 = target_width_px as f32;
+    let target_w_f32 = pixels_to_f32(target_width_px);
     let scale = if target_width_px > 0 && orig_w > target_w_f32 {
         target_w_f32 / orig_w
     } else {
         1.0
     };
 
-    let final_w = (orig_w * scale).round().max(1.0) as u32;
-    let final_h = (orig_h * scale).round().max(1.0) as u32;
-    let transform = Transform::from_scale(scale, scale);
+    let final_w = scaled_side_px(orig_w * scale);
+    let final_h = scaled_side_px(orig_h * scale);
+    (final_w, final_h, Transform::from_scale(scale, scale))
+}
 
-    (final_w, final_h, transform)
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "une largeur en pixels est très inférieure aux 2^24 valeurs exactes d'un f32"
+)]
+const fn pixels_to_f32(pixels: u32) -> f32 {
+    pixels as f32
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "la valeur est arrondie puis bornée à 1.0 ; `as` sature vers `u32::MAX` sans comportement indéfini"
+)]
+fn scaled_side_px(length: f32) -> u32 {
+    length.round().max(1.0) as u32
 }
 
 /// Rasterise un contenu SVG en une image matricielle RGBA.
@@ -183,6 +196,43 @@ mod tests {
             first != second,
             "les libellés doivent produire des glyphes distincts"
         );
+    }
+
+    #[test]
+    fn test_compute_scaled_dimensions_keeps_image_narrower_than_target() {
+        assert_eq!(
+            compute_scaled_dimensions(200.0, 100.0, 400),
+            (200, 100, Transform::from_scale(1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn test_compute_scaled_dimensions_shrinks_wider_image_keeping_ratio() {
+        assert_eq!(
+            compute_scaled_dimensions(200.0, 100.0, 100),
+            (100, 50, Transform::from_scale(0.5, 0.5))
+        );
+    }
+
+    #[test]
+    fn test_compute_scaled_dimensions_ignores_zero_target_width() {
+        assert_eq!(
+            compute_scaled_dimensions(200.0, 100.0, 0),
+            (200, 100, Transform::from_scale(1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn test_compute_scaled_dimensions_never_returns_empty_side() {
+        let (width, height, _) = compute_scaled_dimensions(1000.0, 1.0, 10);
+        assert_eq!((width, height), (10, 1));
+    }
+
+    #[test]
+    fn test_compute_scaled_dimensions_falls_back_on_degenerate_size() {
+        let fallback = (100, 100, Transform::default());
+        assert_eq!(compute_scaled_dimensions(0.0, 10.0, 50), fallback);
+        assert_eq!(compute_scaled_dimensions(10.0, -1.0, 50), fallback);
     }
 
     #[test]
