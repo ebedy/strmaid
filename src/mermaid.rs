@@ -127,7 +127,7 @@ const ALTERNATIVE_ENGINE_HINT: &str = "non pris en charge par mermaid-svg ; reco
 pub fn extract_error_detail(err: &RenderError) -> DiagramErrorDetail {
     match err {
         RenderError::Parse(parse_err) => parse_error_detail(parse_err),
-        _ => DiagramErrorDetail::new(err.to_string(), None, Some("RenderError".to_string())),
+        _ => DiagramErrorDetail::of_kind(err.to_string(), "RenderError"),
     }
 }
 
@@ -148,7 +148,7 @@ fn parse_error_detail(err: &ParseError) -> DiagramErrorDetail {
             Some(1),
             Some("Empty".to_string()),
         ),
-        _ => DiagramErrorDetail::new(err.to_string(), None, Some("ParseError".to_string())),
+        _ => DiagramErrorDetail::of_kind(err.to_string(), "ParseError"),
     }
 }
 
