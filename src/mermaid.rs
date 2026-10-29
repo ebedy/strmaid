@@ -1,6 +1,6 @@
 use crate::domain::{CliError, DiagramBlock, DiagramEngineType, DiagramErrorDetail, ThemeMode};
 use clap::ValueEnum;
-use mermaid_svg::Theme;
+use mermaid_svg::{ParseError, RenderError, Theme};
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -124,31 +124,31 @@ const ALTERNATIVE_ENGINE_HINT: &str = "non pris en charge par mermaid-svg ; reco
 
 /// Extrait les informations d'erreur détaillées (message, ligne, catégorie).
 #[must_use]
-pub fn extract_error_detail(err: &mermaid_svg::RenderError) -> DiagramErrorDetail {
+pub fn extract_error_detail(err: &RenderError) -> DiagramErrorDetail {
     match err {
-        mermaid_svg::RenderError::Parse(parse_err) => match parse_err {
-            mermaid_svg::ParseError::Syntax {
-                kind,
-                message,
-                line,
-            } => DiagramErrorDetail::new(message.clone(), Some(*line), Some(format!("{kind:?}"))),
-            mermaid_svg::ParseError::UnknownDiagramType(diag_type) => DiagramErrorDetail::new(
-                format!("type de diagramme inconnu: {diag_type} ({ALTERNATIVE_ENGINE_HINT})"),
-                Some(1),
-                Some("UnknownDiagramType".to_string()),
-            ),
-            mermaid_svg::ParseError::Empty => DiagramErrorDetail::new(
-                "diagramme Mermaid vide".to_string(),
-                Some(1),
-                Some("Empty".to_string()),
-            ),
-            _ => DiagramErrorDetail::new(
-                format!("{parse_err}"),
-                None,
-                Some("ParseError".to_string()),
-            ),
-        },
-        _ => DiagramErrorDetail::new(format!("{err}"), None, Some("RenderError".to_string())),
+        RenderError::Parse(parse_err) => parse_error_detail(parse_err),
+        _ => DiagramErrorDetail::new(err.to_string(), None, Some("RenderError".to_string())),
+    }
+}
+
+fn parse_error_detail(err: &ParseError) -> DiagramErrorDetail {
+    match err {
+        ParseError::Syntax {
+            kind,
+            message,
+            line,
+        } => DiagramErrorDetail::new(message.clone(), Some(*line), Some(format!("{kind:?}"))),
+        ParseError::UnknownDiagramType(diag_type) => DiagramErrorDetail::new(
+            format!("type de diagramme inconnu: {diag_type} ({ALTERNATIVE_ENGINE_HINT})"),
+            Some(1),
+            Some("UnknownDiagramType".to_string()),
+        ),
+        ParseError::Empty => DiagramErrorDetail::new(
+            "diagramme Mermaid vide".to_string(),
+            Some(1),
+            Some("Empty".to_string()),
+        ),
+        _ => DiagramErrorDetail::new(err.to_string(), None, Some("ParseError".to_string())),
     }
 }
 
@@ -662,6 +662,49 @@ mod tests {
         render_to_svg_detailed(&block, ThemeMode::Dark)
             .err()
             .unwrap_or_else(|| DiagramErrorDetail::new(String::new(), None, None))
+    }
+
+    #[test]
+    fn test_extract_error_detail_syntax_keeps_message_line_and_kind() {
+        let err = RenderError::Parse(ParseError::Syntax {
+            kind: mermaid_svg::SyntaxKind::Unclosed,
+            message: "crochet non fermé".to_string(),
+            line: 7,
+        });
+        assert_eq!(
+            extract_error_detail(&err),
+            DiagramErrorDetail::new(
+                "crochet non fermé".to_string(),
+                Some(7),
+                Some("Unclosed".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_extract_error_detail_unknown_diagram_type_embeds_engine_hint() {
+        let err = RenderError::Parse(ParseError::UnknownDiagramType("venn-beta".to_string()));
+        assert_eq!(
+            extract_error_detail(&err),
+            DiagramErrorDetail::new(
+                format!("type de diagramme inconnu: venn-beta ({ALTERNATIVE_ENGINE_HINT})"),
+                Some(1),
+                Some("UnknownDiagramType".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn test_extract_error_detail_empty_diagram() {
+        let err = RenderError::Parse(ParseError::Empty);
+        assert_eq!(
+            extract_error_detail(&err),
+            DiagramErrorDetail::new(
+                "diagramme Mermaid vide".to_string(),
+                Some(1),
+                Some("Empty".to_string())
+            )
+        );
     }
 
     #[test]
