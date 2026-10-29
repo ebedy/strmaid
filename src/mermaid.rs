@@ -2,6 +2,7 @@ use crate::domain::{CliError, DiagramBlock, DiagramEngineType, DiagramErrorDetai
 use clap::ValueEnum;
 use mermaid_svg::Theme;
 use std::borrow::Cow;
+use std::ops::Range;
 
 /// Sélectionne la configuration du thème mermaid-svg.
 #[must_use]
@@ -506,55 +507,55 @@ pub fn adapt_direction_for_viewport(source: &str, target_cols: u16) -> Cow<'_, s
     if target_cols >= AUTOFOLD_WIDTH_THRESHOLD {
         return Cow::Borrowed(source);
     }
-
-    if let Some((range, _orig_dir)) = find_main_direction_token(source) {
-        let mut adapted = String::with_capacity(source.len());
-        adapted.push_str(&source[..range.start]);
-        adapted.push_str("TD");
-        adapted.push_str(&source[range.end..]);
-        Cow::Owned(adapted)
-    } else {
-        Cow::Borrowed(source)
-    }
-}
-
-fn find_main_direction_token(source: &str) -> Option<(std::ops::Range<usize>, &'static str)> {
-    let mut cursor = 0;
-    while cursor < source.len() {
-        let remainder = &source[cursor..];
-        let line = match remainder.split_once('\n') {
-            Some((l, _)) => l.strip_suffix('\r').unwrap_or(l),
-            None => remainder,
-        };
-
-        let trimmed = line.trim_start();
-        if !trimmed.is_empty() && !trimmed.starts_with("%%") {
-            let indent = line.len() - trimmed.len();
-            return inspect_header_line(trimmed, cursor + indent);
-        }
-
-        cursor += line.len();
-        if cursor < source.len() && source[cursor..].starts_with("\r\n") {
-            cursor += 2;
-        } else if cursor < source.len()
-            && (source[cursor..].starts_with('\n') || source[cursor..].starts_with('\r'))
-        {
-            cursor += 1;
-        }
-    }
-    None
-}
-
-fn inspect_header_line(
-    trimmed_line: &str,
-    base_offset: usize,
-) -> Option<(std::ops::Range<usize>, &'static str)> {
-    let (keyword_len, rest) = if let Some(r) = trimmed_line.strip_prefix("graph") {
-        (5, r)
-    } else {
-        let r = trimmed_line.strip_prefix("flowchart")?;
-        (9, r)
+    let Some(direction) = find_main_direction_token(source) else {
+        return Cow::Borrowed(source);
     };
+    Cow::Owned(format!(
+        "{}TD{}",
+        &source[..direction.start],
+        &source[direction.end..]
+    ))
+}
+
+/// Mots-clés d'en-tête portant une direction.
+const HEADER_KEYWORDS: [&str; 2] = ["graph", "flowchart"];
+
+/// Directions horizontales à convertir en `TD`.
+const HORIZONTAL_DIRECTIONS: [&str; 2] = ["LR", "RL"];
+
+/// Plage de la direction horizontale de l'en-tête, lu sur la première ligne significative.
+fn find_main_direction_token(source: &str) -> Option<Range<usize>> {
+    let (line_start, line) = first_significant_line(source)?;
+    let trimmed = line.trim_start();
+    inspect_header_line(trimmed, line_start + (line.len() - trimmed.len()))
+}
+
+/// Première ligne ni vide ni commentaire, avec son décalage dans la source.
+fn first_significant_line(source: &str) -> Option<(usize, &str)> {
+    source
+        .split_inclusive('\n')
+        .scan(0, |offset, raw_line| {
+            let line_start = *offset;
+            *offset += raw_line.len();
+            Some((line_start, without_line_terminator(raw_line)))
+        })
+        .find(|(_, line)| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && !trimmed.starts_with("%%")
+        })
+}
+
+/// Retire `\n` puis un éventuel `\r` ; une dernière ligne sans `\n` reste intacte.
+fn without_line_terminator(raw_line: &str) -> &str {
+    raw_line
+        .strip_suffix('\n')
+        .map_or(raw_line, |line| line.strip_suffix('\r').unwrap_or(line))
+}
+
+fn inspect_header_line(trimmed_line: &str, base_offset: usize) -> Option<Range<usize>> {
+    let (keyword_len, rest) = HEADER_KEYWORDS
+        .iter()
+        .find_map(|keyword| Some((keyword.len(), trimmed_line.strip_prefix(keyword)?)))?;
 
     let rest_trimmed = rest.trim_start();
     let ws_len = rest.len() - rest_trimmed.len();
@@ -562,21 +563,14 @@ fn inspect_header_line(
         return None;
     }
 
-    let token_offset = base_offset + keyword_len + ws_len;
-    check_direction_token(rest_trimmed, token_offset)
+    check_direction_token(rest_trimmed, base_offset + keyword_len + ws_len)
 }
 
-fn check_direction_token(
-    rest: &str,
-    token_offset: usize,
-) -> Option<(std::ops::Range<usize>, &'static str)> {
-    if rest.starts_with("LR") && is_direction_boundary(&rest[2..]) {
-        return Some((token_offset..token_offset + 2, "LR"));
-    }
-    if rest.starts_with("RL") && is_direction_boundary(&rest[2..]) {
-        return Some((token_offset..token_offset + 2, "RL"));
-    }
-    None
+fn check_direction_token(rest: &str, token_offset: usize) -> Option<Range<usize>> {
+    HORIZONTAL_DIRECTIONS.iter().find_map(|direction| {
+        let after = rest.strip_prefix(direction)?;
+        is_direction_boundary(after).then(|| token_offset..token_offset + direction.len())
+    })
 }
 
 fn is_direction_boundary(text: &str) -> bool {
@@ -743,6 +737,52 @@ mod tests {
     fn test_diagram_engine_default_name() {
         let engine = default_engine();
         assert_eq!(engine.name(), "mermaid-svg");
+    }
+
+    fn adapted(input: &str) -> String {
+        adapt_direction_for_viewport(input, 80).into_owned()
+    }
+
+    #[test]
+    fn test_adapt_direction_handles_crlf_line_endings_after_comment() {
+        assert_eq!(
+            adapted("%% note\r\ngraph LR\r\nA-->B"),
+            "%% note\r\ngraph TD\r\nA-->B"
+        );
+    }
+
+    #[test]
+    fn test_adapt_direction_header_on_last_line_keeps_trailing_carriage_return() {
+        assert_eq!(adapted("graph LR\r"), "graph TD\r");
+        assert_eq!(adapted("graph LR"), "graph TD");
+    }
+
+    #[test]
+    fn test_adapt_direction_skips_blank_and_comment_lines_and_indentation() {
+        assert_eq!(
+            adapted("\n  \n%% x\n   flowchart RL\nA-->B\n"),
+            "\n  \n%% x\n   flowchart TD\nA-->B\n"
+        );
+    }
+
+    #[test]
+    fn test_adapt_direction_only_inspects_first_significant_line() {
+        let source = "A-->B\ngraph LR\n";
+        assert_eq!(adapted(source), source);
+    }
+
+    #[test]
+    fn test_adapt_direction_without_header_returns_source_unchanged() {
+        for source in ["", "\n\n", "%% seulement un commentaire\n", "   \r\n"] {
+            assert_eq!(adapted(source), source);
+        }
+    }
+
+    #[test]
+    fn test_adapt_direction_requires_whitespace_and_boundary_around_direction() {
+        for source in ["graphLR\nA-->B", "graph LRX\nA-->B", "graph\nLR"] {
+            assert_eq!(adapted(source), source);
+        }
     }
 
     #[test]
