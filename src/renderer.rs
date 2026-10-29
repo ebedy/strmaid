@@ -888,11 +888,17 @@ mod tests {
         limits.with_render_timeout(Some(std::time::Duration::from_secs(5)))
     }
 
-    fn sleeping_render(millis: u64) -> impl FnOnce() -> Result<(), CliError> + Send + 'static {
-        move || {
-            std::thread::sleep(std::time::Duration::from_millis(millis));
+    /// Rendu qui reste en cours tant que l'émetteur renvoyé n'est pas envoyé ou détruit :
+    /// il ne peut donc jamais se terminer avant le délai, quelle que soit la charge.
+    fn blocked_render() -> (
+        std::sync::mpsc::Sender<()>,
+        impl FnOnce() -> Result<(), CliError> + Send + 'static,
+    ) {
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        (release, move || {
+            let _ = released.recv();
             Ok(())
-        }
+        })
     }
 
     fn wait_until_no_orphan(budget: &RenderThreadBudget) -> usize {
@@ -909,16 +915,21 @@ mod tests {
     fn test_render_budget_caps_orphan_renders() {
         let budget = RenderThreadBudget::default();
         let limits = budget_limits(4);
-        let outcomes: Vec<Result<(), CliError>> = (0..20)
-            .map(|_| budget.run_with_timeout(sleeping_render(200), &limits))
-            .collect();
+        let (releases, outcomes): (Vec<_>, Vec<Result<(), CliError>>) = (0..20)
+            .map(|_| {
+                let (release, render) = blocked_render();
+                (release, budget.run_with_timeout(render, &limits))
+            })
+            .unzip();
 
-        assert!(budget.orphans() <= 4, "orphelins : {}", budget.orphans());
+        assert_eq!(budget.orphans(), 4);
         let refused = outcomes
             .iter()
             .filter(|res| matches!(res, Err(CliError::ResourceLimit(msg)) if msg.contains("abandonnés")))
             .count();
         assert_eq!(refused, 16);
+
+        drop(releases);
         assert_eq!(wait_until_no_orphan(&budget), 0);
         assert_eq!(
             budget.run_with_timeout(|| Ok(1), &recovery_limits(limits)),
@@ -943,14 +954,18 @@ mod tests {
     fn test_render_budget_releases_orphan_when_render_panics() {
         let budget = RenderThreadBudget::default();
         let limits = budget_limits(1);
+        let (release, released) = std::sync::mpsc::channel::<()>();
         let res: Result<(), CliError> = budget.run_with_timeout(
-            || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
+            move || {
+                let _ = released.recv();
                 std::panic::resume_unwind(Box::new("moteur en échec"))
             },
             &limits,
         );
-        assert!(matches!(res, Err(CliError::ResourceLimit(_))));
+        assert!(matches!(res, Err(CliError::ResourceLimit(msg)) if msg.contains("délai")));
+        assert_eq!(budget.orphans(), 1);
+
+        drop(release);
         assert_eq!(wait_until_no_orphan(&budget), 0);
         assert_eq!(
             budget.run_with_timeout(|| Ok(7), &recovery_limits(limits)),
