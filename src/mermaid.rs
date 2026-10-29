@@ -385,19 +385,86 @@ impl LabelSanitizer {
             _ => {}
         }
     }
+
+    /// Consomme le prochain élément de `remainder` ; `None` une fois la source épuisée.
+    fn next_step<'a>(&mut self, remainder: &'a str) -> Option<SanitizeStep<'a>> {
+        let ch = remainder.chars().next()?;
+        if self.in_comment {
+            self.process_comment(ch);
+            return Some(SanitizeStep::verbatim(&remainder[..ch.len_utf8()]));
+        }
+        if remainder.starts_with(COMMENT_MARKER) && !self.is_in_label() {
+            self.in_comment = true;
+            return Some(SanitizeStep::verbatim(&remainder[..COMMENT_MARKER.len()]));
+        }
+        self.update_quotes(ch);
+        self.update_delimiters(ch);
+        let step = self
+            .ampersand_step(ch, remainder)
+            .unwrap_or_else(|| SanitizeStep::verbatim(&remainder[..ch.len_utf8()]));
+        Some(step)
+    }
+
+    fn ampersand_step<'a>(&self, ch: char, remainder: &'a str) -> Option<SanitizeStep<'a>> {
+        if ch != '&' || !self.is_in_label() {
+            return None;
+        }
+        let (replacement, consumed) = check_ampersand_action(remainder)?;
+        Some(SanitizeStep {
+            emitted: Emitted::Replacement(replacement),
+            consumed,
+        })
+    }
 }
 
+const COMMENT_MARKER: &str = "%%";
+
+/// Texte à écrire en sortie pour un élément de la source.
+#[derive(Debug, PartialEq, Eq)]
+enum Emitted<'a> {
+    Verbatim(&'a str),
+    Replacement(char),
+}
+
+/// Élément traité : sortie produite et nombre d'octets de source consommés.
+#[derive(Debug, PartialEq, Eq)]
+struct SanitizeStep<'a> {
+    emitted: Emitted<'a>,
+    consumed: usize,
+}
+
+impl<'a> SanitizeStep<'a> {
+    const fn verbatim(text: &'a str) -> Self {
+        Self {
+            emitted: Emitted::Verbatim(text),
+            consumed: text.len(),
+        }
+    }
+
+    fn append_to(&self, out: &mut String) {
+        match self.emitted {
+            Emitted::Verbatim(text) => out.push_str(text),
+            Emitted::Replacement(ch) => out.push(ch),
+        }
+    }
+}
+
+/// Entités désignant une esperluette : consommées en entier lors du remplacement.
+const AMPERSAND_ENTITIES: [&str; 2] = ["&amp;", "&#38;"];
+
+/// Entités HTML conservées telles quelles dans un libellé.
+const PRESERVED_ENTITIES: [&str; 4] = ["&lt;", "&gt;", "&quot;", "&apos;"];
+
 fn check_ampersand_action(remainder: &str) -> Option<(char, usize)> {
-    if remainder.starts_with("&amp;") {
-        return Some((SAFE_AMPERSAND, 5));
+    if let Some(entity) = AMPERSAND_ENTITIES
+        .iter()
+        .find(|entity| remainder.starts_with(**entity))
+    {
+        return Some((SAFE_AMPERSAND, entity.len()));
     }
-    if remainder.starts_with("&#38;") {
-        return Some((SAFE_AMPERSAND, 5));
-    }
-    if remainder.starts_with("&lt;")
-        || remainder.starts_with("&gt;")
-        || remainder.starts_with("&quot;")
-        || remainder.starts_with("&apos;")
+    if PRESERVED_ENTITIES
+        .iter()
+        .any(|entity| remainder.starts_with(entity))
     {
         return None;
     }
@@ -415,46 +482,13 @@ pub fn sanitize_mermaid_labels(source: &str) -> Cow<'_, str> {
         return Cow::Borrowed(source);
     }
 
-    let mut result = String::with_capacity(source.len());
     let mut sanitizer = LabelSanitizer::default();
-    let mut cursor = 0;
-
-    while cursor < source.len() {
-        let remainder = &source[cursor..];
-        let Some(ch) = remainder.chars().next() else {
-            break;
-        };
-
-        if sanitizer.in_comment {
-            result.push(ch);
-            sanitizer.process_comment(ch);
-            cursor += ch.len_utf8();
-            continue;
-        }
-
-        if remainder.starts_with("%%") && !sanitizer.is_in_label() {
-            sanitizer.in_comment = true;
-            result.push_str("%%");
-            cursor += 2;
-            continue;
-        }
-
-        sanitizer.update_quotes(ch);
-        sanitizer.update_delimiters(ch);
-
-        if ch == '&'
-            && sanitizer.is_in_label()
-            && let Some((replacement, advance)) = check_ampersand_action(remainder)
-        {
-            result.push(replacement);
-            cursor += advance;
-            continue;
-        }
-
-        result.push(ch);
-        cursor += ch.len_utf8();
+    let mut remainder = source;
+    let mut result = String::with_capacity(source.len());
+    while let Some(step) = sanitizer.next_step(remainder) {
+        step.append_to(&mut result);
+        remainder = &remainder[step.consumed..];
     }
-
     Cow::Owned(result)
 }
 
@@ -952,6 +986,65 @@ mod tests {
         let sanitized = sanitize_mermaid_labels(src);
         assert!(sanitized.contains(r#"|"Process ﹠ Validate"|"#));
         assert!(sanitized.contains("|Step 1 ﹠ Step 2|"));
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_leaves_comment_untouched_until_newline() {
+        let src = "A[\"x\"] %% a & b\nB[\"c & d\"]";
+        assert_eq!(
+            sanitize_mermaid_labels(src).as_ref(),
+            "A[\"x\"] %% a & b\nB[\"c ﹠ d\"]"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_double_percent_inside_label_is_not_a_comment() {
+        let src = "A[\"50%% & x\"] --> B[\"y & z\"]";
+        assert_eq!(
+            sanitize_mermaid_labels(src).as_ref(),
+            "A[\"50%% ﹠ x\"] --> B[\"y ﹠ z\"]"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_escaped_quote_keeps_label_open() {
+        let src = "A[\"say \\\"hi\\\" & bye\"]";
+        assert_eq!(
+            sanitize_mermaid_labels(src).as_ref(),
+            "A[\"say \\\"hi\\\" ﹠ bye\"]"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_keeps_multibyte_characters() {
+        let src = "é[\"à & ü\"] & ö";
+        assert_eq!(sanitize_mermaid_labels(src).as_ref(), "é[\"à ﹠ ü\"] & ö");
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_replaces_unknown_and_unterminated_entities() {
+        assert_eq!(
+            sanitize_mermaid_labels("A[\"&foo; &").as_ref(),
+            "A[\"﹠foo; ﹠"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_unbalanced_closers_do_not_open_a_label() {
+        let src = "] ) } & A[\"x & y\"]";
+        assert_eq!(
+            sanitize_mermaid_labels(src).as_ref(),
+            "] ) } & A[\"x ﹠ y\"]"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_mermaid_labels_handles_parentheses_and_braces() {
+        let src = "A(b & c) --> D{e & f}";
+        assert_eq!(
+            sanitize_mermaid_labels(src).as_ref(),
+            "A(b ﹠ c) --> D{e ﹠ f}"
+        );
     }
 
     #[test]
