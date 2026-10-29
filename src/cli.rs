@@ -7,7 +7,10 @@ use std::path::PathBuf;
 /// Strmaid: Rendu fluide de flux Markdown et diagrammes Mermaid en terminal.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "chaque booléen est un drapeau CLI indépendant dérivé par clap ; ils sont convertis en types du domaine dans `build_render_options` et `preferred_mode`"
+)]
 pub struct CliArgs {
     /// Sous-commande optionnelle (ex. doctor).
     #[command(subcommand)]
