@@ -1,8 +1,10 @@
 use crate::domain::{CliError, CodeFence, DiagramBlock, strip_ansi};
 use crate::renderer::{self, RenderOptions};
-use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
 use std::io::{self, IsTerminal, Read, Write};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread;
+use std::time::Duration;
 
 /// Garde RAII pour la gestion du mode brut du terminal hôte.
 pub struct RawModeGuard {
@@ -55,6 +57,18 @@ const MAX_PENDING_LINE_BYTES: usize = 64 * 1024;
 /// processeur ; au-delà, le lecteur est bloqué, ce qui propage la contre-pression
 /// à l'enfant au lieu d'accumuler sa sortie en mémoire.
 const PTY_CHANNEL_CAPACITY: usize = 64;
+
+/// Taille de lecture du PTY ; fixe aussi la granularité de la contre-pression.
+const PTY_READ_CHUNK_BYTES: usize = 2048;
+
+/// Taille de lecture de l'entrée standard relayée vers l'enfant.
+const STDIN_CHUNK_BYTES: usize = 1024;
+
+/// Délai d'attente d'un fragment avant de sonder l'état de l'enfant.
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Dimensions (colonnes, lignes) retenues lorsque le terminal hôte est inconnu.
+const DEFAULT_HOST_SIZE: (u16, u16) = (80, 24);
 
 /// État de l'intercepteur de flux PTY.
 #[derive(Debug, PartialEq, Eq)]
@@ -342,120 +356,184 @@ fn sync_pty_size(master: &dyn MasterPty, previous: (u16, u16)) -> (u16, u16) {
     }
 }
 
+/// Session PTY : terminal maître, processus enfant et dernière taille connue de l'hôte.
+struct PtySession {
+    master: Box<dyn MasterPty + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    host_size: (u16, u16),
+}
+
+/// Issue d'une itération de la boucle de relais.
+#[derive(Debug, PartialEq, Eq)]
+enum RelayStep {
+    Continue,
+    Finished,
+}
+
+impl PtySession {
+    fn start(command: CommandBuilder, host_size: (u16, u16)) -> Result<Self, CliError> {
+        let (cols, rows) = host_size;
+        let PtyPair { slave, master } = native_pty_system()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| CliError::TerminalInit(format!("Échec ouverture PTY: {e}")))?;
+        let child = slave
+            .spawn_command(command)
+            .map_err(|e| CliError::Io(format!("Échec spawn commande: {e}")))?;
+        // Le côté esclave doit être fermé pour que le lecteur du maître observe la fin de flux.
+        drop(slave);
+        Ok(Self {
+            master,
+            child,
+            host_size,
+        })
+    }
+
+    fn take_writer(&self) -> Result<Box<dyn Write + Send>, CliError> {
+        self.master
+            .take_writer()
+            .map_err(|e| CliError::Io(format!("Échec acquisition PTY writer: {e}")))
+    }
+
+    fn clone_reader(&self) -> Result<Box<dyn Read + Send>, CliError> {
+        self.master
+            .try_clone_reader()
+            .map_err(|e| CliError::Io(format!("Échec clone PTY reader: {e}")))
+    }
+
+    /// Relaie la sortie du PTY vers `processor` jusqu'à la fin de l'enfant ou du flux.
+    fn relay<W: Write>(
+        &mut self,
+        chunks: &Receiver<Vec<u8>>,
+        processor: &mut PtyStreamProcessor<W>,
+    ) -> Result<(), CliError> {
+        loop {
+            self.host_size = sync_pty_size(self.master.as_ref(), self.host_size);
+            if self.next_step(chunks, processor)? == RelayStep::Finished {
+                return Ok(());
+            }
+        }
+    }
+
+    fn next_step<W: Write>(
+        &mut self,
+        chunks: &Receiver<Vec<u8>>,
+        processor: &mut PtyStreamProcessor<W>,
+    ) -> Result<RelayStep, CliError> {
+        match chunks.recv_timeout(CHILD_POLL_INTERVAL) {
+            Ok(bytes) => processor
+                .process_bytes(&bytes)
+                .map(|()| RelayStep::Continue),
+            Err(RecvTimeoutError::Timeout) if self.child_has_exited() => {
+                chunks
+                    .try_iter()
+                    .try_for_each(|bytes| processor.process_bytes(&bytes))?;
+                Ok(RelayStep::Finished)
+            }
+            Err(RecvTimeoutError::Timeout) => Ok(RelayStep::Continue),
+            Err(RecvTimeoutError::Disconnected) => Ok(RelayStep::Finished),
+        }
+    }
+
+    fn child_has_exited(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(Some(_)))
+    }
+
+    /// Ferme le terminal maître et rend l'enfant, dont il reste à attendre la fin.
+    fn into_child(self) -> Box<dyn Child + Send + Sync> {
+        self.child
+    }
+}
+
+fn command_builder(command: &[String]) -> Result<CommandBuilder, CliError> {
+    let (program, args) = command.split_first().ok_or_else(|| {
+        CliError::CommandLine("Aucune commande spécifiée pour strmaid run".to_string())
+    })?;
+    let mut builder = CommandBuilder::new(program);
+    builder.args(args);
+    Ok(builder)
+}
+
+/// Relaie l'entrée standard vers l'enfant lorsqu'elle est interactive ; sinon le
+/// `writer` est libéré, ce qui signale la fin d'entrée à l'enfant.
+fn spawn_stdin_forwarder(writer: Box<dyn Write + Send>) -> Option<thread::JoinHandle<()>> {
+    io::stdin()
+        .is_terminal()
+        .then(|| thread::spawn(move || forward_stdin(writer)))
+}
+
+fn forward_stdin(mut writer: Box<dyn Write + Send>) {
+    let mut stdin = io::stdin();
+    let mut buf = [0u8; STDIN_CHUNK_BYTES];
+    while let Some(read) = read_retrying_on_interrupt(&mut stdin, &mut buf) {
+        if forward_chunk(&mut writer, &buf[..read]).is_err() {
+            return;
+        }
+    }
+}
+
+fn forward_chunk(writer: &mut dyn Write, chunk: &[u8]) -> io::Result<()> {
+    writer.write_all(chunk)?;
+    writer.flush()
+}
+
+fn spawn_pty_reader(reader: Box<dyn Read + Send>) -> (Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+    let (sender, receiver) = sync_channel(PTY_CHANNEL_CAPACITY);
+    let handle = thread::spawn(move || read_pty_chunks(reader, &sender));
+    (receiver, handle)
+}
+
+fn read_pty_chunks(mut reader: Box<dyn Read + Send>, sender: &SyncSender<Vec<u8>>) {
+    let mut buf = [0u8; PTY_READ_CHUNK_BYTES];
+    while let Some(read) = read_retrying_on_interrupt(reader.as_mut(), &mut buf) {
+        if sender.send(buf[..read].to_vec()).is_err() {
+            return;
+        }
+    }
+}
+
+/// Lit un fragment ; `None` signale la fin de flux ou une erreur définitive.
+fn read_retrying_on_interrupt(reader: &mut dyn Read, buf: &mut [u8]) -> Option<usize> {
+    loop {
+        match reader.read(buf) {
+            Ok(0) => return None,
+            Ok(read) => return Some(read),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Exécute une commande dans un pseudo-terminal (PTY) interactif.
 ///
 /// # Errors
 /// Renvoie `CliError` en cas d'échec d'initialisation, de spawn ou d'I/O.
 pub fn run_pty(command: &[String], options: RenderOptions) -> Result<u32, CliError> {
-    if command.is_empty() {
-        return Err(CliError::CommandLine(
-            "Aucune commande spécifiée pour strmaid run".to_string(),
-        ));
-    }
+    let command = command_builder(command)?;
+    let host_size = crossterm::terminal::size().unwrap_or(DEFAULT_HOST_SIZE);
+    let mut session = PtySession::start(command, host_size)?;
+    let pty_input = session.take_writer()?;
+    let pty_output = session.clone_reader()?;
 
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| CliError::TerminalInit(format!("Échec ouverture PTY: {e}")))?;
-
-    let mut cmd = CommandBuilder::new(&command[0]);
-    for arg in &command[1..] {
-        cmd.arg(arg);
-    }
-
-    let mut child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| CliError::Io(format!("Échec spawn commande: {e}")))?;
-
-    drop(pair.slave);
-
-    let mut master_reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| CliError::Io(format!("Échec clone PTY reader: {e}")))?;
-
-    let mut master_writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| CliError::Io(format!("Échec acquisition PTY writer: {e}")))?;
-
-    let _guard = RawModeGuard::enter()?;
-
-    let _stdin_thread = if io::stdin().is_terminal() {
-        Some(thread::spawn(move || {
-            let mut stdin = io::stdin();
-            let mut buf = [0u8; 1024];
-            loop {
-                match stdin.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if master_writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                        let _ = master_writer.flush();
-                    }
-                }
-            }
-        }))
-    } else {
-        drop(master_writer);
-        None
-    };
-
-    let (tx, rx) = std::sync::mpsc::sync_channel(PTY_CHANNEL_CAPACITY);
-    let reader_thread = thread::spawn(move || {
-        let mut read_buf = [0u8; 2048];
-        loop {
-            match master_reader.read(&mut read_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(read_buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
-    });
+    let _raw_mode = RawModeGuard::enter()?;
+    let _stdin_forwarder = spawn_stdin_forwarder(pty_input);
+    let (chunks, reader_thread) = spawn_pty_reader(pty_output);
 
     let stdout = io::stdout();
     let mut processor = PtyStreamProcessor::new(stdout.lock(), options);
-
-    let mut host_size = (cols, rows);
-    loop {
-        host_size = sync_pty_size(pair.master.as_ref(), host_size);
-        match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-            Ok(bytes) => processor.process_bytes(&bytes)?,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if let Ok(Some(_)) = child.try_wait() {
-                    while let Ok(bytes) = rx.try_recv() {
-                        processor.process_bytes(&bytes)?;
-                    }
-                    break;
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-
+    session.relay(&chunks, &mut processor)?;
     processor.finish()?;
 
-    drop(rx);
-    drop(pair.master);
+    drop(chunks);
+    let mut child = session.into_child();
     let _ = reader_thread.join();
-
     let exit_status = child
         .wait()
         .map_err(|e| CliError::Io(format!("Échec attente processus PTY: {e}")))?;
-
     Ok(exit_status.exit_code())
 }
 
@@ -674,6 +752,12 @@ mod tests {
 
         let out_str = String::from_utf8(out).unwrap_or_default();
         assert_eq!(out_str, "agent> ");
+    }
+
+    #[test]
+    fn test_run_pty_rejects_empty_command() {
+        let result = run_pty(&[], RenderOptions::default());
+        assert!(matches!(result, Err(CliError::CommandLine(_))));
     }
 
     #[test]
