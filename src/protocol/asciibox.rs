@@ -174,17 +174,14 @@ fn map_mermaid_text_error(err: MermaidTextError) -> DiagramErrorDetail {
             Some(1),
             Some("UnsupportedDiagram".to_string()),
         ),
-        MermaidTextError::ParseError(msg) => DiagramErrorDetail::new(
-            format!("erreur de syntaxe Mermaid: {msg}"),
-            None,
-            Some("ParseError".to_string()),
-        ),
-        MermaidTextError::TooWide { requested, actual } => DiagramErrorDetail::new(
+        MermaidTextError::ParseError(msg) => {
+            DiagramErrorDetail::of_kind(format!("erreur de syntaxe Mermaid: {msg}"), "ParseError")
+        }
+        MermaidTextError::TooWide { requested, actual } => DiagramErrorDetail::of_kind(
             format!(
                 "le diagramme dépasse la largeur du terminal ({actual} > {requested} colonnes)"
             ),
-            None,
-            Some("TooWide".to_string()),
+            "TooWide",
         ),
     }
 }
@@ -263,6 +260,15 @@ mod tests {
             .unwrap_or_else(|| DiagramErrorDetail::new(String::new(), None, None));
         assert_eq!(err.kind.as_deref(), Some("TooWide"), "{err:?}");
         assert!(err.message.contains("20"), "{}", err.message);
+    }
+
+    #[test]
+    fn test_map_mermaid_text_error_parse_error_has_no_line() {
+        let err =
+            map_mermaid_text_error(MermaidTextError::ParseError("jeton inattendu".to_string()));
+        assert_eq!(err.kind.as_deref(), Some("ParseError"), "{err:?}");
+        assert_eq!(err.line, None);
+        assert!(err.message.contains("jeton inattendu"), "{}", err.message);
     }
 
     #[test]

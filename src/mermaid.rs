@@ -263,21 +263,17 @@ impl DiagramEngine for MermanEngine {
                 merman::OperationControl::new(),
                 merman::SvgRequest::default(),
             ))
-            .map_err(|err| {
-                DiagramErrorDetail::new(format!("{err}"), None, Some("MermanError".to_string()))
-            })?;
+            .map_err(|err| DiagramErrorDetail::of_kind(format!("{err}"), "MermanError"))?;
 
         match output {
             merman::RenderOutput::Svg(Some(svg_artifact)) => Ok(svg_artifact.svg().to_string()),
-            merman::RenderOutput::Svg(None) => Err(DiagramErrorDetail::new(
+            merman::RenderOutput::Svg(None) => Err(DiagramErrorDetail::of_kind(
                 "Merman n'a produit aucun flux SVG".to_string(),
-                None,
-                Some("EmptyOutput".to_string()),
+                "EmptyOutput",
             )),
-            _ => Err(DiagramErrorDetail::new(
+            _ => Err(DiagramErrorDetail::of_kind(
                 "Merman a produit un format de sortie inattendu".to_string(),
-                None,
-                Some("UnexpectedOutput".to_string()),
+                "UnexpectedOutput",
             )),
         }
     }
@@ -600,9 +596,8 @@ pub fn render_to_svg_detailed_with_engine(
     theme_mode: ThemeMode,
     engine_type: DiagramEngineType,
 ) -> Result<String, DiagramErrorDetail> {
-    let engine = get_engine(engine_type).map_err(|err| {
-        DiagramErrorDetail::new(format!("{err}"), None, Some("EngineError".to_string()))
-    })?;
+    let engine = get_engine(engine_type)
+        .map_err(|err| DiagramErrorDetail::of_kind(format!("{err}"), "EngineError"))?;
     let sanitized = sanitize_mermaid_labels(diagram.as_str());
     let render_block = match sanitized {
         Cow::Owned(s) => DiagramBlock::with_metadata(s, diagram.metadata().clone()),
