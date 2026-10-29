@@ -125,12 +125,33 @@ impl RenderOptions {
     }
 }
 
+/// Largeur minimale de rendu, en colonnes de terminal.
+const MIN_RENDER_COLUMNS: u16 = 10;
+
+/// Largeur approximative d'une cellule de terminal, en pixels.
+const PIXELS_PER_COLUMN: u32 = 8;
+
+impl RenderOptions {
+    /// Colonnes effectivement disponibles pour le rendu, plancher `MIN_RENDER_COLUMNS` compris.
+    fn render_columns(&self) -> u16 {
+        self.viewport.columns.max(MIN_RENDER_COLUMNS)
+    }
+
+    fn raster_width_px(&self) -> u32 {
+        u32::from(self.render_columns()) * PIXELS_PER_COLUMN
+    }
+
+    fn asciibox_options(&self) -> asciibox::AsciiBoxOptions {
+        asciibox::AsciiBoxOptions::new(self.render_columns(), self.theme != ThemeMode::Mono)
+    }
+}
+
 fn resolve_effective_options(diagram: &DiagramBlock, options: RenderOptions) -> RenderOptions {
     let theme = diagram.theme_override().unwrap_or(options.theme);
     let target_cols = diagram
         .width_override()
         .unwrap_or_else(|| options.viewport.target_columns())
-        .max(10);
+        .max(MIN_RENDER_COLUMNS);
     let viewport = ViewportGeometry::new(target_cols, options.viewport.rows);
 
     RenderOptions {
@@ -146,7 +167,7 @@ fn prepare_diagram_for_rendering(
 ) -> Cow<'_, DiagramBlock> {
     // La neutralisation des esperluettes reste propre au chemin SVG
     // (`render_to_svg_detailed_with_engine`) : `mermaid-text` lit `&` sans dislocation.
-    let target_cols = options.viewport.columns.max(10);
+    let target_cols = options.render_columns();
     if !options.auto_orient {
         return Cow::Borrowed(diagram);
     }
@@ -184,23 +205,70 @@ pub fn render_unclosed_notice() -> String {
     format!("\x1b[33m⚠️  [{UNCLOSED_MESSAGE}]\x1b[0m\n")
 }
 
+/// Diagramme source d'un élément JSON : rang dans le flux, titre et contenu d'origine.
+struct JsonItemSource<'a> {
+    index: usize,
+    title: Option<&'a str>,
+    raw_content: &'a str,
+}
+
+/// Charge utile d'un rendu réussi telle qu'exposée dans le champ `payload`.
+struct RenderedPayload {
+    protocol: GraphicsProtocol,
+    dimensions: Option<DiagramDimensions>,
+    content: String,
+}
+
+impl<'a> JsonItemSource<'a> {
+    fn of(diagram: &'a DiagramBlock, index: usize) -> Self {
+        Self {
+            index,
+            title: diagram.title(),
+            raw_content: diagram.as_str(),
+        }
+    }
+
+    fn rendered(&self, payload: RenderedPayload) -> JsonStreamItem {
+        JsonStreamItem::Diagram {
+            index: self.index,
+            valid: true,
+            title: self.title.map(ToString::to_string),
+            dimensions: payload.dimensions,
+            protocol: Some(payload.protocol),
+            payload: Some(payload.content),
+            error: None,
+            raw_content: self.raw_content.to_string(),
+        }
+    }
+
+    fn failed(
+        &self,
+        protocol: Option<GraphicsProtocol>,
+        error: DiagramErrorDetail,
+    ) -> JsonStreamItem {
+        JsonStreamItem::Diagram {
+            index: self.index,
+            valid: false,
+            title: self.title.map(ToString::to_string),
+            dimensions: None,
+            protocol,
+            payload: None,
+            error: Some(error),
+            raw_content: self.raw_content.to_string(),
+        }
+    }
+}
+
 /// Élément structuré d'un bloc non fermé (`valid: false`, `kind: UnterminatedBlock`).
 #[must_use]
 pub fn unclosed_diagram_json_item(content: &str, index: usize) -> JsonStreamItem {
-    JsonStreamItem::Diagram {
+    let source = JsonItemSource {
         index,
-        valid: false,
         title: None,
-        dimensions: None,
-        protocol: None,
-        payload: None,
-        error: Some(DiagramErrorDetail::new(
-            UNCLOSED_MESSAGE.to_string(),
-            None,
-            Some("UnterminatedBlock".to_string()),
-        )),
-        raw_content: content.to_string(),
-    }
+        raw_content: content,
+    };
+    let error = DiagramErrorDetail::of_kind(UNCLOSED_MESSAGE.to_string(), "UnterminatedBlock");
+    source.failed(None, error)
 }
 
 /// Élément structuré d'un diagramme hors quota (`valid: false`, `kind: ResourceLimit`).
@@ -210,20 +278,16 @@ pub fn oversized_diagram_json_item(
     options: RenderOptions,
     index: usize,
 ) -> JsonStreamItem {
-    JsonStreamItem::Diagram {
+    let source = JsonItemSource {
         index,
-        valid: false,
         title: None,
-        dimensions: None,
-        protocol: None,
-        payload: None,
-        error: Some(DiagramErrorDetail::new(
-            oversized_message(skipped_bytes, options.limits),
-            None,
-            Some("ResourceLimit".to_string()),
-        )),
-        raw_content: String::new(),
-    }
+        raw_content: "",
+    };
+    let error = DiagramErrorDetail::of_kind(
+        oversized_message(skipped_bytes, options.limits),
+        "ResourceLimit",
+    );
+    source.failed(None, error)
 }
 
 /// Analyse et rend un bloc Mermaid sous forme structurée pour agents IA (JSON / NDJSON).
@@ -233,165 +297,113 @@ pub fn analyze_and_render_diagram(
     options: RenderOptions,
     index: usize,
 ) -> JsonStreamItem {
-    let raw_source = diagram.as_str().to_string();
     let effective_options = resolve_effective_options(diagram, options);
-    let effective_diagram = prepare_diagram_for_rendering(diagram, effective_options);
-    let render_target = effective_diagram.into_owned();
+    let render_target = prepare_diagram_for_rendering(diagram, effective_options).into_owned();
+    let original = diagram.clone();
     let limits = effective_options.limits;
 
-    let res = run_with_render_timeout(
+    run_with_render_timeout(
         move || {
-            let item = if effective_options.protocol == GraphicsProtocol::AsciiBox {
-                render_asciibox_to_json_item(&render_target, effective_options, index)
-            } else {
-                render_svg_or_fallback_json_item(&render_target, effective_options, index)
-            };
-            Ok(item)
+            let source = JsonItemSource::of(&original, index);
+            Ok(render_json_item(&render_target, effective_options, &source))
         },
         &limits,
-    );
+    )
+    .unwrap_or_else(|err| {
+        let error = DiagramErrorDetail::of_kind(err.to_string(), "RenderTimeout");
+        JsonItemSource::of(diagram, index).failed(None, error)
+    })
+}
 
-    let mut item = match res {
-        Ok(item) => item,
-        Err(err) => JsonStreamItem::Diagram {
-            index,
-            valid: false,
-            title: diagram.title().map(ToString::to_string),
-            dimensions: None,
-            protocol: None,
-            payload: None,
-            error: Some(DiagramErrorDetail::new(
-                format!("{err}"),
-                None,
-                Some("RenderTimeout".to_string()),
-            )),
-            raw_content: raw_source.clone(),
-        },
-    };
+fn render_json_item(
+    target: &DiagramBlock,
+    options: RenderOptions,
+    source: &JsonItemSource,
+) -> JsonStreamItem {
+    if options.protocol == GraphicsProtocol::AsciiBox {
+        return render_asciibox_to_json_item(target, options, source);
+    }
+    render_svg_or_fallback_json_item(target, options, source)
+}
 
-    if let JsonStreamItem::Diagram { raw_content, .. } = &mut item {
-        *raw_content = raw_source;
+fn render_svg_or_fallback_json_item(
+    target: &DiagramBlock,
+    options: RenderOptions,
+    source: &JsonItemSource,
+) -> JsonStreamItem {
+    let svg =
+        match mermaid::render_to_svg_detailed_with_engine(target, options.theme, options.engine) {
+            Ok(svg) => svg,
+            Err(err_detail) => return source.failed(None, err_detail),
+        };
+    let item = render_svg_to_json_item(&svg, options, source);
+    if is_valid_diagram(&item) || !options.fallback_asciibox {
+        return item;
+    }
+    let ascii_item = render_asciibox_to_json_item(target, options, source);
+    if is_valid_diagram(&ascii_item) {
+        return ascii_item;
     }
     item
 }
 
-fn render_svg_or_fallback_json_item(
-    render_target: &DiagramBlock,
-    options: RenderOptions,
-    index: usize,
-) -> JsonStreamItem {
-    match mermaid::render_to_svg_detailed_with_engine(render_target, options.theme, options.engine)
-    {
-        Ok(svg) => {
-            let item = render_svg_to_json_item(&svg, render_target, options, index);
-            if matches!(item, JsonStreamItem::Diagram { valid: false, .. })
-                && options.fallback_asciibox
-            {
-                let ascii_item = render_asciibox_to_json_item(render_target, options, index);
-                if matches!(ascii_item, JsonStreamItem::Diagram { valid: true, .. }) {
-                    return ascii_item;
-                }
-            }
-            item
-        }
-        Err(err_detail) => JsonStreamItem::Diagram {
-            index,
-            valid: false,
-            title: render_target.title().map(ToString::to_string),
-            dimensions: None,
-            protocol: None,
-            payload: None,
-            error: Some(err_detail),
-            raw_content: render_target.as_str().to_string(),
-        },
-    }
+fn is_valid_diagram(item: &JsonStreamItem) -> bool {
+    matches!(item, JsonStreamItem::Diagram { valid: true, .. })
 }
 
 fn render_asciibox_to_json_item(
-    diagram: &DiagramBlock,
+    target: &DiagramBlock,
     options: RenderOptions,
-    index: usize,
+    source: &JsonItemSource,
 ) -> JsonStreamItem {
-    let target_cols = options.viewport.columns.max(10);
-    let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
-
-    match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
-        Ok(text) => JsonStreamItem::Diagram {
-            index,
-            valid: true,
-            title: diagram.title().map(ToString::to_string),
+    match asciibox::render_asciibox(target.as_str(), options.asciibox_options()) {
+        Ok(content) => source.rendered(RenderedPayload {
+            protocol: GraphicsProtocol::AsciiBox,
             dimensions: None,
-            protocol: Some(GraphicsProtocol::AsciiBox),
-            payload: Some(text),
-            error: None,
-            raw_content: diagram.as_str().to_string(),
-        },
-        Err(err_detail) => JsonStreamItem::Diagram {
-            index,
-            valid: false,
-            title: diagram.title().map(ToString::to_string),
-            dimensions: None,
-            protocol: Some(GraphicsProtocol::AsciiBox),
-            payload: None,
-            error: Some(err_detail),
-            raw_content: diagram.as_str().to_string(),
-        },
+            content,
+        }),
+        Err(err_detail) => source.failed(Some(GraphicsProtocol::AsciiBox), err_detail),
     }
 }
 
 fn render_svg_to_json_item(
     svg: &str,
-    diagram: &DiagramBlock,
     options: RenderOptions,
-    index: usize,
+    source: &JsonItemSource,
 ) -> JsonStreamItem {
     if options.protocol == GraphicsProtocol::Raw {
-        return JsonStreamItem::Diagram {
-            index,
-            valid: true,
-            title: diagram.title().map(ToString::to_string),
+        return source.rendered(RenderedPayload {
+            protocol: GraphicsProtocol::Raw,
             dimensions: None,
-            protocol: Some(GraphicsProtocol::Raw),
-            payload: Some(svg.to_string()),
-            error: None,
-            raw_content: diagram.as_str().to_string(),
-        };
-    }
-
-    let target_cols = options.viewport.columns.max(10);
-    let target_width_px = u32::from(target_cols) * 8;
-    let encoded = rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels)
-        .and_then(|image| {
-            let dimensions = DiagramDimensions::new(image.width, image.height);
-            let image = composite_on_theme_background(image, options.theme);
-            encode_image_for_protocol(&image, options).map(|payload| (dimensions, payload))
+            content: svg.to_string(),
         });
-    match encoded {
-        Ok((dimensions, payload)) => JsonStreamItem::Diagram {
-            index,
-            valid: true,
-            title: diagram.title().map(ToString::to_string),
-            dimensions: Some(dimensions),
-            protocol: Some(options.protocol),
-            payload: Some(payload),
-            error: None,
-            raw_content: diagram.as_str().to_string(),
-        },
-        Err(err) => JsonStreamItem::Diagram {
-            index,
-            valid: false,
-            title: diagram.title().map(ToString::to_string),
-            dimensions: None,
-            protocol: None,
-            payload: None,
-            error: Some(DiagramErrorDetail::new(
-                err.to_string(),
-                None,
-                Some(raster_error_kind(&err).to_string()),
-            )),
-            raw_content: diagram.as_str().to_string(),
-        },
     }
+    match rasterize_and_encode(svg, options) {
+        Ok((dimensions, content)) => source.rendered(RenderedPayload {
+            protocol: options.protocol,
+            dimensions: Some(dimensions),
+            content,
+        }),
+        Err(err) => {
+            let error = DiagramErrorDetail::of_kind(err.to_string(), raster_error_kind(&err));
+            source.failed(None, error)
+        }
+    }
+}
+
+fn rasterize_and_encode(
+    svg: &str,
+    options: RenderOptions,
+) -> Result<(DiagramDimensions, String), CliError> {
+    let image = rasterizer::rasterize_svg(
+        svg,
+        options.raster_width_px(),
+        options.limits.max_raster_pixels,
+    )?;
+    let dimensions = DiagramDimensions::new(image.width, image.height);
+    let image = composite_on_theme_background(image, options.theme);
+    let payload = encode_image_for_protocol(&image, options)?;
+    Ok((dimensions, payload))
 }
 
 /// Cycle de vie d'un rendu sous garde temporelle, partagé entre l'appelant et le
@@ -512,6 +524,39 @@ where
     RENDER_THREADS.run_with_timeout(f, limits)
 }
 
+/// Rendu terminal d'un bloc : sortie à émettre, validité et charge utile à mettre en cache.
+struct RenderOutcome {
+    output: String,
+    is_valid: bool,
+    cacheable_payload: Option<String>,
+}
+
+impl RenderOutcome {
+    fn cacheable(output: String, payload: String) -> Self {
+        Self {
+            output,
+            is_valid: true,
+            cacheable_payload: Some(payload),
+        }
+    }
+
+    fn uncached(output: String) -> Self {
+        Self {
+            output,
+            is_valid: true,
+            cacheable_payload: None,
+        }
+    }
+
+    fn fallback(output: String) -> Self {
+        Self {
+            output,
+            is_valid: false,
+            cacheable_payload: None,
+        }
+    }
+}
+
 /// Rendu d'un bloc Mermaid avec rapport de validité (succès vs fallback d'erreur).
 #[must_use]
 pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) -> (String, bool) {
@@ -528,41 +573,37 @@ pub fn render_diagram_checked(diagram: &DiagramBlock, options: RenderOptions) ->
     );
 
     if let Some(cached_payload) = RenderCache::global().get(&cache_key) {
-        let title_prefix = diagram.title().map_or_else(String::new, |t| {
-            format_title_header(t, effective_options.viewport.columns)
-        });
+        let title_prefix = optional_title_header(diagram, effective_options.viewport.columns);
         return (format!("{title_prefix}{cached_payload}"), true);
     }
 
-    let diag_for_render = diagram.clone();
-    let limits = effective_options.limits;
-
-    let render_result = run_with_render_timeout(
-        move || {
-            if effective_options.protocol == GraphicsProtocol::AsciiBox {
-                Ok(render_asciibox_to_terminal(
-                    &diag_for_render,
-                    effective_options,
-                ))
-            } else {
-                Ok(render_graphical_with_fallback(
-                    &diag_for_render,
-                    effective_options,
-                ))
-            }
-        },
-        &limits,
-    );
-
-    match render_result {
-        Ok((output, is_valid, cacheable_payload)) => {
-            if let Some(payload) = cacheable_payload {
+    match render_with_timeout(diagram, effective_options) {
+        Ok(outcome) => {
+            if let Some(payload) = outcome.cacheable_payload {
                 RenderCache::global().insert(cache_key, payload);
             }
-            (output, is_valid)
+            (outcome.output, outcome.is_valid)
         }
         Err(err) => (format_fallback(diagram, &err), false),
     }
+}
+
+fn render_with_timeout(
+    diagram: &DiagramBlock,
+    options: RenderOptions,
+) -> Result<RenderOutcome, CliError> {
+    let diagram = diagram.clone();
+    run_with_render_timeout(
+        move || Ok(render_for_protocol(&diagram, options)),
+        &options.limits,
+    )
+}
+
+fn render_for_protocol(diagram: &DiagramBlock, options: RenderOptions) -> RenderOutcome {
+    if options.protocol == GraphicsProtocol::AsciiBox {
+        return render_asciibox_to_terminal(diagram, options);
+    }
+    render_graphical_with_fallback(diagram, options)
 }
 
 /// Rendu de repli `AsciiBox` après un échec graphique.
@@ -573,61 +614,41 @@ fn render_asciibox_fallback(
     diagram: &DiagramBlock,
     options: RenderOptions,
     original_err: &CliError,
-) -> (String, bool, Option<String>) {
-    let target_cols = options.viewport.columns.max(10);
-    let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
-    match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
+) -> RenderOutcome {
+    match asciibox::render_asciibox(diagram.as_str(), options.asciibox_options()) {
         Ok(text) => {
-            let title_prefix = diagram
-                .title()
-                .map_or_else(String::new, |t| format_title_header(t, target_cols));
-            let error_text = original_err.to_string();
+            let title_prefix = optional_title_header(diagram, options.render_columns());
             let warning = format!(
                 "\x1b[33m⚠️  [Rendu graphique indisponible: {}; repli automatique en mode AsciiBox]\x1b[0m\n",
-                sanitize_terminal_text(&error_text)
+                sanitize_terminal_text(&original_err.to_string())
             );
-            (format!("{warning}{title_prefix}{text}"), true, None)
+            RenderOutcome::uncached(format!("{warning}{title_prefix}{text}"))
         }
-        Err(_) => (format_fallback(diagram, original_err), false, None),
+        Err(_) => RenderOutcome::fallback(format_fallback(diagram, original_err)),
     }
 }
 
-fn render_graphical_with_fallback(
-    diagram: &DiagramBlock,
-    options: RenderOptions,
-) -> (String, bool, Option<String>) {
-    let render_result = mermaid::render_to_svg_with_engine(diagram, options.theme, options.engine)
-        .and_then(|svg| render_svg_to_terminal_with_raw(&svg, diagram, options));
+fn render_graphical_with_fallback(diagram: &DiagramBlock, options: RenderOptions) -> RenderOutcome {
+    let rendered = mermaid::render_to_svg_with_engine(diagram, options.theme, options.engine)
+        .and_then(|svg| render_svg_to_terminal(&svg, diagram, options));
 
-    match render_result {
-        Ok((output, raw_payload)) => (output, true, Some(raw_payload)),
-        Err(err) => {
-            if options.fallback_asciibox && !matches!(err, CliError::MermaidSyntax(_)) {
-                render_asciibox_fallback(diagram, options, &err)
-            } else {
-                (format_fallback(diagram, &err), false, None)
-            }
+    match rendered {
+        Ok(outcome) => outcome,
+        Err(err) if options.fallback_asciibox && !matches!(err, CliError::MermaidSyntax(_)) => {
+            render_asciibox_fallback(diagram, options, &err)
         }
+        Err(err) => RenderOutcome::fallback(format_fallback(diagram, &err)),
     }
 }
 
-fn render_asciibox_to_terminal(
-    diagram: &DiagramBlock,
-    options: RenderOptions,
-) -> (String, bool, Option<String>) {
-    let target_cols = options.viewport.columns.max(10);
-    let ascii_opts = asciibox::AsciiBoxOptions::new(target_cols, options.theme != ThemeMode::Mono);
-
-    match asciibox::render_asciibox(diagram.as_str(), ascii_opts) {
+fn render_asciibox_to_terminal(diagram: &DiagramBlock, options: RenderOptions) -> RenderOutcome {
+    match asciibox::render_asciibox(diagram.as_str(), options.asciibox_options()) {
         Ok(text) => {
-            let title_prefix = diagram
-                .title()
-                .map_or_else(String::new, |t| format_title_header(t, target_cols));
-            (format!("{title_prefix}{text}"), true, Some(text))
+            let title_prefix = optional_title_header(diagram, options.render_columns());
+            RenderOutcome::cacheable(format!("{title_prefix}{text}"), text)
         }
         Err(err_detail) => {
-            let cli_err = asciibox_error_to_cli(err_detail);
-            (format_fallback(diagram, &cli_err), false, None)
+            RenderOutcome::fallback(format_fallback(diagram, &asciibox_error_to_cli(err_detail)))
         }
     }
 }
@@ -646,27 +667,30 @@ pub fn render_diagram(diagram: &DiagramBlock, options: RenderOptions) -> String 
     render_diagram_checked(diagram, options).0
 }
 
-/// Convertit le SVG généré vers la sortie terminal selon le protocole choisi en extrayant le payload brut.
-fn render_svg_to_terminal_with_raw(
+/// Convertit le SVG généré vers la sortie terminal selon le protocole choisi, en conservant
+/// le payload brut pour le cache.
+fn render_svg_to_terminal(
     svg: &str,
     diagram: &DiagramBlock,
     options: RenderOptions,
-) -> Result<(String, String), CliError> {
+) -> Result<RenderOutcome, CliError> {
     if options.protocol == GraphicsProtocol::Raw {
         let raw = format!("{svg}\n");
-        return Ok((raw.clone(), raw));
+        return Ok(RenderOutcome::cacheable(raw.clone(), raw));
     }
 
-    let target_cols = options.viewport.columns.max(10);
-    let target_width_px = u32::from(target_cols) * 8;
+    let (_, encoded) = rasterize_and_encode(svg, options)?;
+    let title_prefix = optional_title_header(diagram, options.render_columns());
+    Ok(RenderOutcome::cacheable(
+        format!("{title_prefix}{encoded}"),
+        encoded,
+    ))
+}
 
-    let image = rasterizer::rasterize_svg(svg, target_width_px, options.limits.max_raster_pixels)?;
-    let image = composite_on_theme_background(image, options.theme);
-    let encoded = encode_image_for_protocol(&image, options)?;
-    let title_prefix = diagram
+fn optional_title_header(diagram: &DiagramBlock, target_cols: u16) -> String {
+    diagram
         .title()
-        .map_or_else(String::new, |t| format_title_header(t, target_cols));
-    Ok((format!("{title_prefix}{encoded}"), encoded))
+        .map_or_else(String::new, |title| format_title_header(title, target_cols))
 }
 
 fn format_title_header(title: &str, target_cols: u16) -> String {
@@ -718,7 +742,7 @@ fn encode_image_for_protocol(
     image: &RasterizedImage,
     options: RenderOptions,
 ) -> Result<String, CliError> {
-    let target_cols = options.viewport.columns.max(10);
+    let target_cols = options.render_columns();
     Ok(match options.protocol {
         GraphicsProtocol::Kitty => kitty::encode_kitty_graphics(image),
         GraphicsProtocol::Iterm2 => iterm2::encode_iterm2(image)?,
@@ -1377,5 +1401,92 @@ mod tests {
             }
             JsonStreamItem::Text { .. } => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_render_columns_enforces_minimum_width() {
+        let narrow = RenderOptions::new(
+            ThemeMode::Dark,
+            GraphicsProtocol::Kitty,
+            ViewportGeometry::new(4, 24),
+        );
+        assert_eq!(narrow.render_columns(), MIN_RENDER_COLUMNS);
+        assert_eq!(
+            narrow.raster_width_px(),
+            u32::from(MIN_RENDER_COLUMNS) * PIXELS_PER_COLUMN
+        );
+        assert_eq!(RenderOptions::default().render_columns(), 80);
+    }
+
+    #[test]
+    fn test_asciibox_options_follow_theme_color() {
+        let colored = RenderOptions::default().asciibox_options();
+        let mono = RenderOptions {
+            theme: ThemeMode::Mono,
+            ..RenderOptions::default()
+        }
+        .asciibox_options();
+        assert_eq!(colored, asciibox::AsciiBoxOptions::new(80, true));
+        assert_eq!(mono, asciibox::AsciiBoxOptions::new(80, false));
+    }
+
+    #[test]
+    fn test_json_item_source_failed_carries_title_and_source() {
+        let block = DiagramBlock::from_raw("```mermaid title=\"Titre\"\nflowchart TD\n```");
+        assert_eq!(block.title(), Some("Titre"));
+        let error = DiagramErrorDetail::of_kind("échec".to_string(), "Kind");
+        let item =
+            JsonItemSource::of(&block, 3).failed(Some(GraphicsProtocol::AsciiBox), error.clone());
+        assert_eq!(
+            item,
+            JsonStreamItem::Diagram {
+                index: 3,
+                valid: false,
+                title: block.title().map(ToString::to_string),
+                dimensions: None,
+                protocol: Some(GraphicsProtocol::AsciiBox),
+                payload: None,
+                error: Some(error),
+                raw_content: block.as_str().to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_json_item_source_rendered_is_valid_without_error() {
+        let block = DiagramBlock::new("flowchart TD\n  A --> B".to_string());
+        let item = JsonItemSource::of(&block, 0).rendered(RenderedPayload {
+            protocol: GraphicsProtocol::Raw,
+            dimensions: None,
+            content: "<svg/>".to_string(),
+        });
+        assert_eq!(
+            item,
+            JsonStreamItem::Diagram {
+                index: 0,
+                valid: true,
+                title: None,
+                dimensions: None,
+                protocol: Some(GraphicsProtocol::Raw),
+                payload: Some("<svg/>".to_string()),
+                error: None,
+                raw_content: block.as_str().to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_render_outcome_constructors_set_validity_and_cache() {
+        let cached = RenderOutcome::cacheable("sortie".to_string(), "charge".to_string());
+        assert!(cached.is_valid);
+        assert_eq!(cached.cacheable_payload.as_deref(), Some("charge"));
+
+        let uncached = RenderOutcome::uncached("sortie".to_string());
+        assert!(uncached.is_valid);
+        assert_eq!(uncached.cacheable_payload, None);
+
+        let fallback = RenderOutcome::fallback("repli".to_string());
+        assert!(!fallback.is_valid);
+        assert_eq!(fallback.cacheable_payload, None);
     }
 }

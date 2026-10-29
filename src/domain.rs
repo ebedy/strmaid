@@ -152,6 +152,12 @@ impl DiagramErrorDetail {
             kind,
         }
     }
+
+    /// Erreur sans position de ligne, classée par `kind`.
+    #[must_use]
+    pub fn of_kind(message: String, kind: &str) -> Self {
+        Self::new(message, None, Some(kind.to_string()))
+    }
 }
 
 /// Élément structuré émis dans les formats machine-readable (JSON / NDJSON).
@@ -1006,6 +1012,15 @@ mod tests {
         assert_eq!(ThemeMode::Phosphor.background_rgb(), (10, 20, 10));
         assert_eq!(ThemeMode::Neon.background_rgb(), (13, 11, 24));
         assert_eq!(ThemeMode::Mono.background_rgb(), (0, 0, 0));
+    }
+
+    #[test]
+    fn test_diagram_error_detail_of_kind_has_no_line() {
+        let detail = DiagramErrorDetail::of_kind("message".to_string(), "Kind");
+        assert_eq!(
+            detail,
+            DiagramErrorDetail::new("message".to_string(), None, Some("Kind".to_string()))
+        );
     }
 
     #[test]
